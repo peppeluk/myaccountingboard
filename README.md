@@ -75,6 +75,38 @@ Endpoints principali API:
 - `GET /health`
 - `PUT /api/cache/:key`
 - `GET /api/cache/:key`
+- `POST /api/journal/export` (estrae file `.xlsx` compilando `LIBRO_GIORNALE` da `giornale_data`)
+
+## Export giornale_data -> Excel
+
+1. Copia il template Excel in `apps/api/templates/t-smart-template.xlsx`
+2. In alternativa imposta `JOURNAL_TEMPLATE_PATH` in `apps/api/.env`
+3. Apri in app il pannello `giornale_data` e usa `Estrai .xlsx`
+4. Per deploy Vercel API, il template deve essere presente nel repository (oppure disponibile su path configurato in runtime)
+
+Nota tecnica: il nome del pannello in app e `giornale_data`, ma il foglio tecnico nel file resta `LIBRO_GIORNALE` per mantenere compatibili le formule degli altri fogli.
+
+## Deploy automatico Vercel
+
+Workflow presenti:
+
+- Web: `.github/workflows/vercel-prod.yml`
+- API: `.github/workflows/vercel-api-prod.yml`
+
+Secret GitHub richiesti:
+
+- `VERCEL_TOKEN`
+- `VERCEL_ORG_ID`
+- `VERCEL_API_PROJECT_ID` (solo API)
+
+Variabili ambiente Vercel consigliate:
+
+- progetto API:
+  - `CORS_ORIGIN=https://<tuo-dominio-web>`
+  - `JOURNAL_TEMPLATE_PATH=./templates/t-smart-template.xlsx`
+  - `REDIS_URL` (opzionale, fallback automatico in-memory)
+- progetto Web:
+  - `VITE_API_BASE_URL=https://<dominio-api-vercel>`
 
 ## Qualita codice
 

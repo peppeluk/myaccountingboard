@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Canvas as FabricCanvas, Line as FabricLine } from "fabric";
+import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
+import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
+import { exportJournalWorkbook } from "./lib/api";
 
 type Tool = "pen" | "eraser" | "line";
 type SizeLevel = "thin" | "medium" | "large";
@@ -28,11 +31,17 @@ type SelectionRect = {
 };
 
 const STORAGE_KEY = "myaccounting.whiteboard.pages.v1";
+const JOURNAL_STORAGE_KEY = "myaccounting.journal.entries.v1";
+const MAX_JOURNAL_ENTRIES = 202;
 const PAGE_HEIGHT = 1600;
 const PAGE_SEPARATOR_HEIGHT = 24;
-const MIN_CANVAS_WIDTH = 900;
 const MAX_HISTORY = 80;
 const AUTO_ADD_SCROLL_THRESHOLD = 120;
+const TOOL_LONG_PRESS_MS = 420;
+const AUTO_OCR_DEBOUNCE_MS = 550;
+const AUTO_OCR_PADDING = 24;
+const SIZE_POPOVER_HALF_WIDTH = 72;
+const SIZE_POPOVER_MARGIN = 8;
 const SIZE_LEVELS: Array<{ key: SizeLevel; label: string }> = [
   { key: "thin", label: "Sottile" },
   { key: "medium", label: "Medio" },
@@ -60,6 +69,54 @@ type OcrWorker = {
   recognize(image: string): Promise<{ data: { text: string } }>;
   terminate(): Promise<unknown>;
 };
+
+function createJournalEntry(): JournalEntry {
+  return {
+    id: `journal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    date: "",
+    accountCode: "",
+    accountName: "",
+    description: "",
+    debit: "",
+    credit: ""
+  };
+}
+
+function loadInitialJournalEntries(): JournalEntry[] {
+  try {
+    const raw = localStorage.getItem(JOURNAL_STORAGE_KEY);
+    if (!raw) {
+      return [createJournalEntry()];
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [createJournalEntry()];
+    }
+
+    const normalized = parsed
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const entry = item as Partial<JournalEntry>;
+        return {
+          id: typeof entry.id === "string" ? entry.id : createJournalEntry().id,
+          date: typeof entry.date === "string" ? entry.date : "",
+          accountCode: typeof entry.accountCode === "string" ? entry.accountCode : "",
+          accountName: typeof entry.accountName === "string" ? entry.accountName : "",
+          description: typeof entry.description === "string" ? entry.description : "",
+          debit: typeof entry.debit === "string" ? entry.debit : "",
+          credit: typeof entry.credit === "string" ? entry.credit : ""
+        } satisfies JournalEntry;
+      })
+      .filter((item): item is JournalEntry => item !== null);
+
+    return normalized.length > 0 ? normalized : [createJournalEntry()];
+  } catch {
+    return [createJournalEntry()];
+  }
+}
 
 function createPage(index: number): Page {
   return {
@@ -147,10 +204,61 @@ function normalizeExpression(input: string): string {
   return input
     .replace(/\s+/g, "")
     .replace(/[xX\u00D7]/g, "*")
-    .replace(/[\u00F7]/g, "/")
+    .replace(/[:\u00F7]/g, "/")
     .replace(/(\d),(\d)/g, "$1.$2")
     .replace(/[^\d+\-*/().%^]/g, "")
     .trim();
+}
+
+function formatExpressionForDisplay(input: string): string {
+  return input.replace(/\*/g, "x").replace(/\//g, ":");
+}
+
+function normalizeOcrOperators(input: string): string {
+  return input
+    .replace(/[‐‑‒–—−﹣_~]/g, "-")
+    .replace(/[＋﹢]/g, "+")
+    .replace(/[×✕✖＊⋅·•*]/g, "x")
+    .replace(/[÷／]/g, ":")
+    .replace(/([0-9)%])([tT†┼╋])(?=[0-9(])/g, "$1+")
+    .replace(/([0-9)%])([;])(?=[0-9(])/g, "$1:")
+    .replace(/([0-9)%])([xX])(?=[0-9(])/g, "$1x")
+    .replace(/([0-9)%])([:/])(?=[0-9(])/g, "$1:");
+}
+
+function normalizeOcrChunk(input: string): string {
+  const normalizedOperators = normalizeOcrOperators(input);
+  return normalizedOperators
+    .replace(/\s+/g, "")
+    .replace(/(\d),(\d)/g, "$1.$2")
+    .replace(/[^\d+\-x:().%^=]/g, "")
+    .replace(/\+{2,}/g, "+")
+    .replace(/x{2,}/g, "x")
+    .replace(/:{2,}/g, ":")
+    .trim();
+}
+
+function mergeRecognizedText(previous: string, nextChunk: string): string {
+  if (!nextChunk) {
+    return previous;
+  }
+  if (!previous) {
+    return nextChunk;
+  }
+  if (previous.endsWith(nextChunk)) {
+    return previous;
+  }
+  if (nextChunk.startsWith(previous)) {
+    return nextChunk;
+  }
+
+  const maxOverlap = Math.min(previous.length, nextChunk.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (previous.slice(-overlap) === nextChunk.slice(0, overlap)) {
+      return `${previous}${nextChunk.slice(overlap)}`;
+    }
+  }
+  return `${previous}${nextChunk}`;
 }
 
 function App() {
@@ -161,15 +269,22 @@ function App() {
   const [color, setColor] = useState("#000000");
   const [penSizeLevel, setPenSizeLevel] = useState<SizeLevel>("medium");
   const [eraserSizeLevel, setEraserSizeLevel] = useState<SizeLevel>("medium");
+  const [isPenSizeMenuOpen, setIsPenSizeMenuOpen] = useState(false);
+  const [isEraserSizeMenuOpen, setIsEraserSizeMenuOpen] = useState(false);
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [isOcrRunning, setIsOcrRunning] = useState(false);
   const [ocrStatus, setOcrStatus] = useState("OCR pronto");
   const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
+  const [isJournalOpen, setIsJournalOpen] = useState(false);
+  const [isJournalExtracting, setIsJournalExtracting] = useState(false);
+  const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(() => loadInitialJournalEntries());
   const [display, setDisplay] = useState("");
   const [isCanvasReady, setIsCanvasReady] = useState(false);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const penToolRef = useRef<HTMLDivElement | null>(null);
+  const eraserToolRef = useRef<HTMLDivElement | null>(null);
   const drawingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const selectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const eraserPreviewRef = useRef<HTMLDivElement | null>(null);
@@ -192,6 +307,14 @@ function App() {
   const redoStackRef = useRef<string[]>([]);
   const isRestoringRef = useRef(false);
   const isAutoAddingPageRef = useRef(false);
+  const toolLongPressTimeoutRef = useRef<number | null>(null);
+  const suppressToolClickRef = useRef(false);
+  const autoOcrTimeoutRef = useRef<number | null>(null);
+  const autoOcrRectRef = useRef<SelectionRect | null>(null);
+  const isAutoOcrBusyRef = useRef(false);
+  const lastOcrChunkRef = useRef<string>("");
+  const clearAutoOcrScheduleRef = useRef<() => void>(() => undefined);
+  const scheduleAutoOcrForRectRef = useRef<(rect: SelectionRect) => void>(() => undefined);
 
   const workerRef = useRef<OcrWorker | null>(null);
   const workerInitPromiseRef = useRef<Promise<OcrWorker> | null>(null);
@@ -253,32 +376,6 @@ function App() {
     brush.decimate = 0;
   }, [color, penStrokeWidth]);
 
-  const applyEraserSettings = useCallback(() => {
-    const canvas = fabricCanvasRef.current;
-    const fabricModule = fabricModuleRef.current;
-    if (!canvas || !fabricModule) {
-      return;
-    }
-
-    class EraserBrush extends fabricModule.PencilBrush {
-      _setBrushStyles(ctx: CanvasRenderingContext2D): void {
-        super._setBrushStyles(ctx);
-        ctx.globalCompositeOperation = "destination-out";
-      }
-    }
-    const eraserBrush = new EraserBrush(canvas);
-
-    const brush = eraserBrush as {
-      color: string;
-      width: number;
-      decimate?: number;
-    };
-    brush.color = "rgba(0,0,0,1)";
-    brush.width = eraserStrokeWidth;
-    brush.decimate = 0;
-    canvas.freeDrawingBrush = brush as FabricCanvas["freeDrawingBrush"];
-  }, [eraserStrokeWidth]);
-
   const clearSelectionOverlay = useCallback(() => {
     const selectionCanvas = selectionCanvasRef.current;
     if (!selectionCanvas) {
@@ -298,6 +395,43 @@ function App() {
     }
     preview.style.display = "none";
   }, []);
+
+  const clearToolLongPress = useCallback(() => {
+    if (toolLongPressTimeoutRef.current !== null) {
+      window.clearTimeout(toolLongPressTimeoutRef.current);
+      toolLongPressTimeoutRef.current = null;
+    }
+  }, []);
+
+  const openToolSizeMenu = useCallback((nextTool: "pen" | "eraser") => {
+    setTool(nextTool);
+    if (nextTool === "pen") {
+      setIsPenSizeMenuOpen(true);
+      setIsEraserSizeMenuOpen(false);
+      return;
+    }
+    setIsEraserSizeMenuOpen(true);
+    setIsPenSizeMenuOpen(false);
+  }, []);
+
+  const handleToolLongPressStart = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>, nextTool: "pen" | "eraser") => {
+      if (event.button !== 0) {
+        return;
+      }
+      clearToolLongPress();
+      toolLongPressTimeoutRef.current = window.setTimeout(() => {
+        suppressToolClickRef.current = true;
+        openToolSizeMenu(nextTool);
+        toolLongPressTimeoutRef.current = null;
+      }, TOOL_LONG_PRESS_MS);
+    },
+    [clearToolLongPress, openToolSizeMenu]
+  );
+
+  const handleToolLongPressEnd = useCallback(() => {
+    clearToolLongPress();
+  }, [clearToolLongPress]);
 
   const handleBoardPointerMove = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -388,7 +522,14 @@ function App() {
 
   const handlePathCreated = useCallback(
     (event: unknown) => {
-      const path = (event as { path?: { set?: (props: Record<string, unknown>) => void } }).path;
+      const path = (
+        event as {
+          path?: {
+            set?: (props: Record<string, unknown>) => void;
+            getBoundingRect?: (options?: { absolute?: boolean; stroke?: boolean }) => SelectionRect;
+          };
+        }
+      ).path;
       if (path?.set) {
         if (activeToolRef.current === "eraser") {
           path.set({
@@ -408,6 +549,11 @@ function App() {
       }
       fabricCanvasRef.current?.requestRenderAll();
       pushHistoryState();
+
+      if (activeToolRef.current === "pen" && path?.getBoundingRect) {
+        const rect = path.getBoundingRect({ absolute: true, stroke: true });
+        scheduleAutoOcrForRectRef.current(rect);
+      }
     },
     [pushHistoryState]
   );
@@ -462,8 +608,58 @@ function App() {
     }
 
     if (tool === "eraser") {
-      canvas.isDrawingMode = true;
-      applyEraserSettings();
+      let isErasing = false;
+      let lastPoint: { x: number; y: number } | null = null;
+
+      const drawEraserSegment = (x1: number, y1: number, x2: number, y2: number) => {
+        if (!fabricModule) {
+          return;
+        }
+        const segment = new fabricModule.Line([x1, y1, x2, y2], {
+          stroke: "rgba(0,0,0,1)",
+          strokeWidth: eraserStrokeWidth,
+          strokeLineCap: "round",
+          strokeLineJoin: "round",
+          globalCompositeOperation: "destination-out",
+          selectable: false,
+          evented: false
+        });
+        canvas.add(segment);
+      };
+
+      const down = (event: unknown) => {
+        const opt = event as { e: MouseEvent };
+        const pointer = canvas.getPointer(opt.e);
+        isErasing = true;
+        lastPoint = pointer;
+        drawEraserSegment(pointer.x, pointer.y, pointer.x + 0.01, pointer.y + 0.01);
+        canvas.requestRenderAll();
+      };
+
+      const move = (event: unknown) => {
+        if (!isErasing || !lastPoint) {
+          return;
+        }
+        const opt = event as { e: MouseEvent };
+        const pointer = canvas.getPointer(opt.e);
+        drawEraserSegment(lastPoint.x, lastPoint.y, pointer.x, pointer.y);
+        lastPoint = pointer;
+        canvas.requestRenderAll();
+      };
+
+      const up = () => {
+        if (!isErasing) {
+          return;
+        }
+        isErasing = false;
+        lastPoint = null;
+        pushHistoryState();
+      };
+
+      canvas.on("mouse:down", down);
+      canvas.on("mouse:move", move);
+      canvas.on("mouse:up", up);
+      toolHandlersRef.current = { down, move, up };
       return;
     }
 
@@ -508,7 +704,7 @@ function App() {
     canvas.on("mouse:move", move);
     canvas.on("mouse:up", up);
     toolHandlersRef.current = { down, move, up };
-  }, [applyBrushSettings, applyEraserSettings, color, detachToolHandlers, penStrokeWidth, pushHistoryState, syncCanvasOffset, tool]);
+  }, [applyBrushSettings, color, detachToolHandlers, eraserStrokeWidth, penStrokeWidth, pushHistoryState, syncCanvasOffset, tool]);
 
   const resizeCanvas = useCallback(() => {
     const canvas = fabricCanvasRef.current;
@@ -520,7 +716,7 @@ function App() {
       return;
     }
 
-    const width = Math.max(MIN_CANVAS_WIDTH, Math.floor(container.clientWidth) - 2);
+    const width = Math.max(1, Math.floor(container.clientWidth));
     const documentHeight = getDocumentHeight(pagesRef.current.length);
 
     canvas.setDimensions({ width, height: documentHeight });
@@ -542,8 +738,17 @@ function App() {
     }
     if (!workerInitPromiseRef.current) {
       workerInitPromiseRef.current = import("tesseract.js").then((tesseract) =>
-        tesseract.createWorker("eng").then((worker) => {
-          const typedWorker = worker as OcrWorker;
+        tesseract.createWorker("eng").then(async (worker) => {
+          const configurableWorker = worker as OcrWorker & {
+            setParameters?: (params: Record<string, string>) => Promise<unknown>;
+          };
+          if (configurableWorker.setParameters) {
+            await configurableWorker.setParameters({
+              tessedit_pageseg_mode: "6",
+              tessedit_char_whitelist: "0123456789+-*/xX().,%=:;tT\u00D7\u00F7"
+            });
+          }
+          const typedWorker = configurableWorker as OcrWorker;
           workerRef.current = typedWorker;
           return typedWorker;
         })
@@ -580,6 +785,9 @@ function App() {
 
     const initialPages = [createPage(0)];
     persistDocument(initialPages, null);
+    lastOcrChunkRef.current = "";
+    autoOcrRectRef.current = null;
+    clearAutoOcrScheduleRef.current();
     currentPageIndexRef.current = 0;
     setCurrentPageIndex(0);
     await loadCanvasData(null);
@@ -663,24 +871,269 @@ function App() {
     persistCurrentDocument();
   }, [loadCanvasData, persistCurrentDocument]);
 
+  const addJournalEntry = useCallback(() => {
+    setJournalEntries((previous) => {
+      if (previous.length >= MAX_JOURNAL_ENTRIES) {
+        window.alert(`Hai raggiunto il limite massimo di ${MAX_JOURNAL_ENTRIES} righe compilabili.`);
+        return previous;
+      }
+      return [...previous, createJournalEntry()];
+    });
+  }, []);
+
+  const clearJournalEntries = useCallback(() => {
+    if (!window.confirm("Vuoi svuotare tutte le righe del Libro Giornale?")) {
+      return;
+    }
+    setJournalEntries([createJournalEntry()]);
+  }, []);
+
+  const removeJournalEntry = useCallback((entryId: string) => {
+    setJournalEntries((previous) => {
+      if (previous.length <= 1) {
+        return previous;
+      }
+      const nextEntries = previous.filter((entry) => entry.id !== entryId);
+      return nextEntries.length > 0 ? nextEntries : [createJournalEntry()];
+    });
+  }, []);
+
+  const updateJournalEntry = useCallback((entryId: string, patch: Partial<JournalEntry>) => {
+    setJournalEntries((previous) =>
+      previous.map((entry) => {
+        if (entry.id !== entryId) {
+          return entry;
+        }
+        return {
+          ...entry,
+          ...patch
+        };
+      })
+    );
+  }, []);
+
+  const extractJournalData = useCallback(async () => {
+    setIsJournalExtracting(true);
+    try {
+      const payload = journalEntries.map((entry) => ({
+        date: entry.date,
+        accountName: entry.accountName,
+        description: entry.description,
+        debit: entry.debit,
+        credit: entry.credit
+      }));
+      const datePart = new Date().toISOString().slice(0, 10);
+      const blob = await exportJournalWorkbook(payload, `giornale_data_${datePart}`);
+
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = `giornale_data_${datePart}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(downloadUrl);
+    } catch {
+      window.alert(
+        "Estrazione non riuscita. Verifica che API sia avviata e che il template sia configurato in JOURNAL_TEMPLATE_PATH."
+      );
+    } finally {
+      setIsJournalExtracting(false);
+    }
+  }, [journalEntries]);
+
   const appendDisplay = useCallback((value: string) => {
     setDisplay((previous) => `${previous}${value}`);
   }, []);
 
+  const solveDisplayExpression = useCallback(
+    async (rawInput: string, fromOcr = false): Promise<boolean> => {
+      const leftSide = rawInput.includes("=") ? rawInput.split("=")[0] ?? "" : rawInput;
+      const expression = normalizeExpression(leftSide);
+      if (!expression) {
+        return false;
+      }
+
+      try {
+        const { evaluate } = await import("mathjs");
+        const result = evaluate(expression);
+        const resolved = `${formatExpressionForDisplay(expression)}=${result}`;
+        setDisplay(resolved);
+        if (fromOcr) {
+          setOcrStatus(`OCR ok: ${resolved}`);
+        }
+        return true;
+      } catch {
+        if (fromOcr) {
+          setOcrStatus("OCR: espressione non valida");
+          return false;
+        }
+        window.alert("Espressione non valida");
+        return false;
+      }
+    },
+    []
+  );
+
   const calculate = useCallback(async () => {
-    const expression = normalizeExpression(display);
-    if (!expression) {
+    await solveDisplayExpression(display);
+  }, [display, solveDisplayExpression]);
+
+  const handlePenClick = useCallback(() => {
+    if (suppressToolClickRef.current) {
+      suppressToolClickRef.current = false;
+      return;
+    }
+    setTool("pen");
+    setIsPenSizeMenuOpen(false);
+    setIsEraserSizeMenuOpen(false);
+  }, []);
+
+  const handleEraserClick = useCallback(() => {
+    if (suppressToolClickRef.current) {
+      suppressToolClickRef.current = false;
+      return;
+    }
+    setTool("eraser");
+    setIsEraserSizeMenuOpen(false);
+    setIsPenSizeMenuOpen(false);
+  }, []);
+
+  const getSizePopoverStyle = useCallback((anchor: HTMLDivElement | null) => {
+    if (!anchor) {
+      return { visibility: "hidden" } as const;
+    }
+
+    const rect = anchor.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const centerX = clamp(
+      rect.left + rect.width / 2,
+      SIZE_POPOVER_MARGIN + SIZE_POPOVER_HALF_WIDTH,
+      viewportWidth - SIZE_POPOVER_MARGIN - SIZE_POPOVER_HALF_WIDTH
+    );
+    const shouldOpenAbove = rect.top > 76;
+
+    return {
+      left: `${centerX}px`,
+      top: shouldOpenAbove ? `${rect.top - 8}px` : `${rect.bottom + 8}px`,
+      transform: shouldOpenAbove ? "translate(-50%, -100%)" : "translate(-50%, 0)"
+    } as const;
+  }, []);
+
+  const clearAutoOcrSchedule = useCallback(() => {
+    if (autoOcrTimeoutRef.current !== null) {
+      window.clearTimeout(autoOcrTimeoutRef.current);
+      autoOcrTimeoutRef.current = null;
+    }
+  }, []);
+  clearAutoOcrScheduleRef.current = clearAutoOcrSchedule;
+
+  const runAutoOcrFromPendingRect = useCallback(async () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || isSelectionMode || isAutoOcrBusyRef.current) {
       return;
     }
 
-    try {
-      const { evaluate } = await import("mathjs");
-      const result = evaluate(expression);
-      setDisplay(String(result));
-    } catch {
-      window.alert("Espressione non valida");
+    const rect = autoOcrRectRef.current;
+    if (!rect || rect.width < 8 || rect.height < 8) {
+      return;
     }
-  }, [display]);
+    autoOcrRectRef.current = null;
+    isAutoOcrBusyRef.current = true;
+    setIsOcrRunning(true);
+    setOcrStatus("OCR automatico...");
+
+    try {
+      const imageData = canvas.toDataURL({
+        format: "png",
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        multiplier: 2
+      });
+
+      const worker = await getWorker();
+      const result = await worker.recognize(imageData);
+      const chunk = normalizeOcrChunk(result.data.text);
+
+      if (!chunk) {
+        setOcrStatus("OCR automatico: nessun testo");
+        return;
+      }
+
+      if (chunk === lastOcrChunkRef.current) {
+        setOcrStatus(`OCR: ${chunk}`);
+        return;
+      }
+      lastOcrChunkRef.current = chunk;
+
+      let mergedDisplay = "";
+      setDisplay((previous) => {
+        mergedDisplay = mergeRecognizedText(previous, chunk);
+        return mergedDisplay;
+      });
+      setOcrStatus(`OCR: ${chunk}`);
+
+      if (mergedDisplay.includes("=")) {
+        await solveDisplayExpression(mergedDisplay, true);
+      }
+    } catch {
+      setOcrStatus("OCR automatico fallito");
+    } finally {
+      isAutoOcrBusyRef.current = false;
+      setIsOcrRunning(false);
+
+      if (autoOcrRectRef.current && autoOcrTimeoutRef.current === null) {
+        autoOcrTimeoutRef.current = window.setTimeout(() => {
+          autoOcrTimeoutRef.current = null;
+          void runAutoOcrFromPendingRect();
+        }, AUTO_OCR_DEBOUNCE_MS);
+      }
+    }
+  }, [getWorker, isSelectionMode, solveDisplayExpression]);
+
+  const scheduleAutoOcrForRect = useCallback(
+    (rect: SelectionRect) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) {
+        return;
+      }
+
+      const canvasWidth = canvas.getWidth();
+      const canvasHeight = canvas.getHeight();
+      const left = clamp(Math.floor(rect.left - AUTO_OCR_PADDING), 0, canvasWidth);
+      const top = clamp(Math.floor(rect.top - AUTO_OCR_PADDING), 0, canvasHeight);
+      const right = clamp(Math.ceil(rect.left + rect.width + AUTO_OCR_PADDING), 0, canvasWidth);
+      const bottom = clamp(Math.ceil(rect.top + rect.height + AUTO_OCR_PADDING), 0, canvasHeight);
+      const normalizedRect: SelectionRect = {
+        left,
+        top,
+        width: Math.max(0, right - left),
+        height: Math.max(0, bottom - top)
+      };
+
+      const previousRect = autoOcrRectRef.current;
+      autoOcrRectRef.current = previousRect
+        ? {
+            left: Math.min(previousRect.left, normalizedRect.left),
+            top: Math.min(previousRect.top, normalizedRect.top),
+            width: Math.max(previousRect.left + previousRect.width, normalizedRect.left + normalizedRect.width) -
+              Math.min(previousRect.left, normalizedRect.left),
+            height: Math.max(previousRect.top + previousRect.height, normalizedRect.top + normalizedRect.height) -
+              Math.min(previousRect.top, normalizedRect.top)
+          }
+        : normalizedRect;
+
+      clearAutoOcrSchedule();
+      autoOcrTimeoutRef.current = window.setTimeout(() => {
+        autoOcrTimeoutRef.current = null;
+        void runAutoOcrFromPendingRect();
+      }, AUTO_OCR_DEBOUNCE_MS);
+    },
+    [clearAutoOcrSchedule, runAutoOcrFromPendingRect]
+  );
+  scheduleAutoOcrForRectRef.current = scheduleAutoOcrForRect;
 
   const runOcrForRect = useCallback(
     async (rect: SelectionRect) => {
@@ -704,11 +1157,18 @@ function App() {
 
         const worker = await getWorker();
         const result = await worker.recognize(imageData);
-        const cleaned = normalizeExpression(result.data.text);
+        const cleaned = normalizeOcrChunk(result.data.text);
 
         if (cleaned) {
-          setDisplay((previous) => `${previous}${cleaned}`);
+          let mergedDisplay = "";
+          setDisplay((previous) => {
+            mergedDisplay = mergeRecognizedText(previous, cleaned);
+            return mergedDisplay;
+          });
           setOcrStatus(`OCR ok: ${cleaned}`);
+          if (mergedDisplay.includes("=")) {
+            await solveDisplayExpression(mergedDisplay, true);
+          }
         } else {
           setOcrStatus("OCR completato: nessuna operazione valida trovata");
         }
@@ -721,7 +1181,7 @@ function App() {
         setIsOcrRunning(false);
       }
     },
-    [clearSelectionOverlay, getWorker]
+    [clearSelectionOverlay, getWorker, solveDisplayExpression]
   );
 
   const handleSelectionPointerDown = useCallback(
@@ -864,20 +1324,6 @@ function App() {
   }, [applyBrushSettings, isCanvasReady, penSizeLevel, color, syncCanvasOffset, tool]);
 
   useEffect(() => {
-    if (!isCanvasReady || tool !== "eraser") {
-      return;
-    }
-    const canvas = fabricCanvasRef.current;
-    if (!canvas) {
-      return;
-    }
-    syncCanvasOffset();
-    canvas.isDrawingMode = true;
-    canvas.selection = false;
-    applyEraserSettings();
-  }, [applyEraserSettings, eraserSizeLevel, isCanvasReady, syncCanvasOffset, tool]);
-
-  useEffect(() => {
     if (!isCanvasReady) {
       return;
     }
@@ -896,6 +1342,14 @@ function App() {
       hideEraserPreview();
     }
   }, [hideEraserPreview, tool]);
+
+  useEffect(() => {
+    if (tool === "pen") {
+      return;
+    }
+    clearAutoOcrSchedule();
+    autoOcrRectRef.current = null;
+  }, [clearAutoOcrSchedule, tool]);
 
   useEffect(() => {
     if (!isCanvasReady) {
@@ -956,6 +1410,41 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      clearToolLongPress();
+      clearAutoOcrSchedule();
+      autoOcrRectRef.current = null;
+    };
+  }, [clearAutoOcrSchedule, clearToolLongPress]);
+
+  useEffect(() => {
+    if (!isPenSizeMenuOpen && !isEraserSizeMenuOpen) {
+      return;
+    }
+
+    const onGlobalPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".tool-trigger") || target?.closest(".size-popover")) {
+        return;
+      }
+      setIsPenSizeMenuOpen(false);
+      setIsEraserSizeMenuOpen(false);
+    };
+
+    window.addEventListener("pointerdown", onGlobalPointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", onGlobalPointerDown);
+    };
+  }, [isEraserSizeMenuOpen, isPenSizeMenuOpen]);
+
+  useEffect(() => {
+    localStorage.setItem(JOURNAL_STORAGE_KEY, JSON.stringify(journalEntries));
+  }, [journalEntries]);
+
+  const penSizePopoverStyle = getSizePopoverStyle(penToolRef.current);
+  const eraserSizePopoverStyle = getSizePopoverStyle(eraserToolRef.current);
+
   return (
     <main className="whiteboard-app">
       <div
@@ -996,26 +1485,88 @@ function App() {
       </div>
 
       <section className="toolbar bottom-toolbar">
-        <button
-          className={`icon-button ${tool === "pen" ? "active" : ""}`}
-          onClick={() => setTool("pen")}
-          title="Penna"
-          aria-label="Penna"
-          type="button"
-        >
-          <i className="fa-solid fa-pen" />
-          <span className="sr-only">Penna</span>
-        </button>
-        <button
-          className={`icon-button ${tool === "eraser" ? "active" : ""}`}
-          onClick={() => setTool("eraser")}
-          title="Gomma"
-          aria-label="Gomma"
-          type="button"
-        >
-          <i className="fa-solid fa-eraser" />
-          <span className="sr-only">Gomma</span>
-        </button>
+        <div className="tool-trigger" ref={penToolRef}>
+          <button
+            className={`icon-button ${tool === "pen" ? "active" : ""}`}
+            onClick={handlePenClick}
+            onPointerDown={(event) => handleToolLongPressStart(event, "pen")}
+            onPointerUp={handleToolLongPressEnd}
+            onPointerLeave={handleToolLongPressEnd}
+            onPointerCancel={handleToolLongPressEnd}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              suppressToolClickRef.current = true;
+              openToolSizeMenu("pen");
+            }}
+            title="Penna"
+            aria-label="Penna"
+            type="button"
+          >
+            <i className="fa-solid fa-pen" />
+            <span className="sr-only">Penna</span>
+          </button>
+          {isPenSizeMenuOpen && (
+            <div className="size-popover" role="group" aria-label="Spessore penna" style={penSizePopoverStyle}>
+              {SIZE_LEVELS.map((level) => (
+                <button
+                  key={`pen-size-${level.key}`}
+                  type="button"
+                  className={`size-visual pen ${penSizeLevel === level.key ? "selected" : ""}`}
+                  onClick={() => {
+                    setPenSizeLevel(level.key);
+                    setTool("pen");
+                    setIsPenSizeMenuOpen(false);
+                  }}
+                  title={`Penna ${level.label.toLowerCase()}`}
+                  aria-label={`Penna ${level.label.toLowerCase()}`}
+                >
+                  <span className={`pen-stroke ${level.key}`} />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="tool-trigger" ref={eraserToolRef}>
+          <button
+            className={`icon-button ${tool === "eraser" ? "active" : ""}`}
+            onClick={handleEraserClick}
+            onPointerDown={(event) => handleToolLongPressStart(event, "eraser")}
+            onPointerUp={handleToolLongPressEnd}
+            onPointerLeave={handleToolLongPressEnd}
+            onPointerCancel={handleToolLongPressEnd}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              suppressToolClickRef.current = true;
+              openToolSizeMenu("eraser");
+            }}
+            title="Gomma"
+            aria-label="Gomma"
+            type="button"
+          >
+            <i className="fa-solid fa-eraser" />
+            <span className="sr-only">Gomma</span>
+          </button>
+          {isEraserSizeMenuOpen && (
+            <div className="size-popover" role="group" aria-label="Spessore gomma" style={eraserSizePopoverStyle}>
+              {SIZE_LEVELS.map((level) => (
+                <button
+                  key={`eraser-size-${level.key}`}
+                  type="button"
+                  className={`size-visual eraser ${eraserSizeLevel === level.key ? "selected" : ""}`}
+                  onClick={() => {
+                    setEraserSizeLevel(level.key);
+                    setTool("eraser");
+                    setIsEraserSizeMenuOpen(false);
+                  }}
+                  title={`Gomma ${level.label.toLowerCase()}`}
+                  aria-label={`Gomma ${level.label.toLowerCase()}`}
+                >
+                  <span className={`eraser-dot ${level.key}`} />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           className={`icon-button ${tool === "line" ? "active" : ""}`}
           onClick={() => setTool("line")}
@@ -1052,39 +1603,6 @@ function App() {
           ))}
         </div>
 
-        <div className="size-controls">
-          <div className="size-control" role="group" aria-label="Spessore penna">
-            <span className="size-label">Penna</span>
-            {SIZE_LEVELS.map((level) => (
-              <button
-                key={`pen-${level.key}`}
-                type="button"
-                className={`size-chip ${penSizeLevel === level.key ? "selected" : ""}`}
-                onClick={() => {
-                  setPenSizeLevel(level.key);
-                }}
-              >
-                {level.label}
-              </button>
-            ))}
-          </div>
-          <div className="size-control" role="group" aria-label="Spessore gomma">
-            <span className="size-label">Gomma</span>
-            {SIZE_LEVELS.map((level) => (
-              <button
-                key={`eraser-${level.key}`}
-                type="button"
-                className={`size-chip ${eraserSizeLevel === level.key ? "selected" : ""}`}
-                onClick={() => {
-                  setEraserSizeLevel(level.key);
-                }}
-              >
-                {level.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
         <button className="icon-button" title="Undo" aria-label="Undo" type="button" onClick={() => void undo()}>
           <i className="fa-solid fa-rotate-left" />
           <span className="sr-only">Undo</span>
@@ -1092,6 +1610,16 @@ function App() {
         <button className="icon-button" title="Redo" aria-label="Redo" type="button" onClick={() => void redo()}>
           <i className="fa-solid fa-rotate-right" />
           <span className="sr-only">Redo</span>
+        </button>
+        <button
+          className={isJournalOpen ? "active journal-toggle-button" : "journal-toggle-button"}
+          title="giornale_data"
+          aria-label="giornale_data"
+          type="button"
+          onClick={() => setIsJournalOpen((value) => !value)}
+        >
+          <i className="fa-solid fa-book-open" />
+          <span>giornale_data</span>
         </button>
         <button
           className="icon-button"
@@ -1150,6 +1678,19 @@ function App() {
           {ocrStatus} | Pagina {currentPageIndex + 1} di {pages.length}
         </span>
       </section>
+
+      <JournalPanel
+        isOpen={isJournalOpen}
+        entries={journalEntries}
+        accounts={PIANO_DEI_CONTI}
+        isExtracting={isJournalExtracting}
+        onClose={() => setIsJournalOpen(false)}
+        onExtract={() => void extractJournalData()}
+        onAddEntry={addJournalEntry}
+        onClearEntries={clearJournalEntries}
+        onRemoveEntry={removeJournalEntry}
+        onUpdateEntry={updateJournalEntry}
+      />
 
       {isCalculatorOpen && (
         <section className="calculator">
