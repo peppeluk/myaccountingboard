@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lavagna Calcoli</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://code.jquery.com/ui/1.12.1/themes/base/jquery-ui.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+    <div id="lavagna" class="container">
+        <div class="canvas-wrapper">
+            <canvas id="drawingCanvas"></canvas>
+            <canvas id="selectionCanvas"></canvas>
+        </div>
+    </div>
+
+    <div class="toolbar">
+        <button id="penTool" title="Penna"><i class="fas fa-pencil-alt"></i></button>
+        <button id="eraserTool" title="Gomma"><i class="fas fa-eraser"></i></button>
+        <button id="lineTool" title="Linea"><i class="fas fa-minus"></i></button>
+        <button id="activateSelection" title="Selezione OCR"><i class="fas fa-mouse-pointer"></i></button>
+
+        <label for="colorPicker">Colore</label>
+        <input type="color" id="colorPicker" value="#000000">
+
+        <label for="brushSize">Spessore</label>
+        <input type="range" id="brushSize" min="1" max="20" value="2">
+
+        <button id="undo" title="Annulla"><i class="fas fa-undo"></i></button>
+        <button id="redo" title="Ripristina"><i class="fas fa-redo"></i></button>
+        <button id="calcolatriceButton" title="Calcolatrice"><i class="fa-solid fa-calculator"></i></button>
+        <button id="aggiungiPagina" title="Aggiungi pagina"><i class="fas fa-plus-square"></i></button>
+
+        <label for="selettorePagine">Pagina</label>
+        <select id="selettorePagine"></select>
+
+        <button id="savePDF" title="Salva PDF"><i class="fas fa-file-pdf"></i></button>
+        <button id="ultimoNomeFile" title="Ultimo salvataggio"><i class="fas fa-folder"></i></button>
+        <button id="clearStorage" title="Cancella dati"><i class="fas fa-trash"></i></button>
+    </div>
+
+    <div id="calcolatrice" title="Calcolatrice">
+        <input type="text" id="display" readonly>
+        <div class="calc-row">
+            <button class="button" onclick="appendDisplay('1')">1</button>
+            <button class="button" onclick="appendDisplay('2')">2</button>
+            <button class="button" onclick="appendDisplay('3')">3</button>
+            <button class="button" onclick="appendDisplay('+')">+</button>
+            <button class="button" onclick="appendDisplay('(')">(</button>
+        </div>
+        <div class="calc-row">
+            <button class="button" onclick="appendDisplay('4')">4</button>
+            <button class="button" onclick="appendDisplay('5')">5</button>
+            <button class="button" onclick="appendDisplay('6')">6</button>
+            <button class="button" onclick="appendDisplay('-')">-</button>
+            <button class="button" onclick="appendDisplay(')')">)</button>
+        </div>
+        <div class="calc-row">
+            <button class="button" onclick="appendDisplay('7')">7</button>
+            <button class="button" onclick="appendDisplay('8')">8</button>
+            <button class="button" onclick="appendDisplay('9')">9</button>
+            <button class="button" onclick="appendDisplay('*')">*</button>
+            <button class="button" onclick="appendDisplay('^')">^</button>
+        </div>
+        <div class="calc-row">
+            <button class="button" onclick="calculate()">=</button>
+            <button class="button" onclick="appendDisplay('0')">0</button>
+            <button class="button" onclick="appendDisplay('.')">.</button>
+            <button class="button" onclick="appendDisplay('/')">/</button>
+            <button class="button" onclick="appendDisplay('%')">%</button>
+        </div>
+        <div class="calc-row">
+            <button class="button button-wide" onclick="clearDisplay()">C</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/4.5.0/fabric.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/2.1.1/tesseract.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.11.1/math.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.min.js"></script>
+    <script src="server.js"></script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>App Disegno con Penna</title>
+    <link rel="stylesheet" href="https://code.jquery.com/ui/1.12.1/themes/base/jquery-ui.css">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; }
+        .toolbar { position: fixed; bottom: 0; width: 100%; background: #f1f1f1; padding: 10px; display: flex; gap: 10px; }
+        #calcolatrice { display: none; }
+        canvas { display: block; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+
+<div class="toolbar">
+    <button id="penTool">Penna</button>
+    <button id="eraserTool">Gomma</button>
+    <button id="lineTool">Linea</button>
+    <input type="color" id="colorPicker" value="#000000">
+    <input type="range" id="brushSize" min="1" max="20" value="1">
+    <button id="undo">Annulla</button>
+    <button id="redo">Ripristina</button>
+    <button id="aggiungiPagina">Aggiungi Pagina</button>
+    <select id="selettorePagine"></select>
+    <button id="ordinaSu">Sposta Pagina Su</button>
+    <button id="ordinaGiu">Sposta Pagina Giù</button>
+    <button id="savePDF">Salva PDF</button>
+    <button id="clearStorage">Cancella Dati</button>
+    <button id="apriCalcolatrice">Calcolatrice</button>
+</div>
+
+<canvas id="drawingCanvas" width="800" height="600"></canvas>
+
+<!-- Calcolatrice -->
+<div id="calcolatrice" title="Calcolatrice">
+    <input type="text" id="display" readonly style="width:100%; font-size:20px; text-align:right; margin-bottom:10px;">
+    <div>
+        <button class="button" onclick="appendDisplay('1')">1</button>
+        <button class="button" onclick="appendDisplay('2')">2</button>
+        <button class="button" onclick="appendDisplay('3')">3</button>
+        <button class="button" onclick="appendDisplay('+')">+</button>
+        <button class="button" onclick="appendDisplay('(')">(</button>
+    </div>
+    <div>
+        <button class="button" onclick="appendDisplay('4')">4</button>
+        <button class="button" onclick="appendDisplay('5')">5</button>
+        <button class="button" onclick="appendDisplay('6')">6</button>
+        <button class="button" onclick="appendDisplay('-')">-</button>
+        <button class="button" onclick="appendDisplay(')')">)</button>
+    </div>
+    <div>
+        <button class="button" onclick="appendDisplay('7')">7</button>
+        <button class="button" onclick="appendDisplay('8')">8</button>
+        <button class="button" onclick="appendDisplay('9')">9</button>
+        <button class="button" onclick="appendDisplay('*')">*</button>
+    </div>
+    <div>
+        <button class="button" onclick="calculate()">=</button>
+        <button class="button" onclick="appendDisplay('0')">0</button>
+        <button class="button" onclick="appendDisplay('.')">.</button>
+        <button class="button" onclick="appendDisplay('/')">/</button>
+    </div>
+    <div>
+        <button class="button" style="width: 100%;" onclick="clearDisplay()">C</button>
+    </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/4.5.0/fabric.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+    const canvas = new fabric.Canvas('drawingCanvas');
+    const pages = [{ canvasData: null, name: "Pagina 1" }];
+    let currentPage = 0;
+
+    function aggiornaSelettore() {
+        const selector = document.getElementById('selettorePagine');
+        selector.innerHTML = '';
+        pages.forEach((p, i) => {
+            selector.innerHTML += `<option value="${i}">${p.name}</option>`;
+        });
+        selector.value = currentPage;
+    }
+
+    function salvaPDF() {
+        const doc = new jsPDF();
+        pages.forEach((p, i) => {
+            canvas.loadFromJSON(p.canvasData, () => {
+                if (i > 0) doc.addPage();
+                doc.addImage(canvas.toDataURL(), 'PNG', 10, 10, 190, 100);
+                if (i === pages.length - 1) doc.save('disegno.pdf');
+            });
+        });
+    }
+
+    document.getElementById('savePDF').addEventListener('click', salvaPDF);
+
+    document.getElementById('aggiungiPagina').addEventListener('click', () => {
+        pages.push({ canvasData: null, name: `Pagina ${pages.length + 1}` });
+        aggiornaSelettore();
+    });
+
+    // Calcolatrice
+    function appendDisplay(val) { document.getElementById('display').value += val; }
+    function clearDisplay() { document.getElementById('display').value = ''; }
+    function calculate() {
+        try { document.getElementById('display').value = eval(document.getElementById('display').value); }
+        catch { alert('Errore calcolo'); clearDisplay(); }
+    }
+    document.getElementById('apriCalcolatrice').addEventListener('click', () => {
+        $('#calcolatrice').dialog('open');
+    });
+
+    // Inizializza
+    aggiornaSelettore();
+</script>
+</body>
+</html>

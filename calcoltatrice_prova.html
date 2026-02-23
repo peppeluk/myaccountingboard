@@ -1,0 +1,41 @@
+div id="calcolatrice" title="Calcolatrice">
+    <input type="text" id="display" readonly style="width:100%; font-size:20px; text-align:right; margin-bottom:10px;">
+    <div>
+        <button class="button" onclick="appendDisplay('1')">1</button>
+        <button class="button" onclick="appendDisplay('2')">2</button>
+        <button class="button" onclick="appendDisplay('3')">3</button>
+        <button class="button" onclick="appendDisplay('+')">+</button>
+        <button class="button" onclick="appendDisplay('(')">(</button>
+    </div>
+    <div>
+        <button class="button" onclick="appendDisplay('4')">4</button>
+        <button class="button" onclick="appendDisplay('5')">5</button>
+        <button class="button" onclick="appendDisplay('6')">6</button>
+        <button class="button" onclick="appendDisplay('-')">-</button>
+        <button class="button" onclick="appendDisplay(')')">)</button>
+    </div>
+    <div>
+        <button class="button" onclick="appendDisplay('7')">7</button>
+        <button class="button" onclick="appendDisplay('8')">8</button>
+        <button class="button" onclick="appendDisplay('9')">9</button>
+        <button class="button" onclick="appendDisplay('*')">*</button>
+    </div>
+    <div>
+        <button class="button" onclick="calculate()">=</button>
+        <button class="button" onclick="appendDisplay('0')">0</button>
+        <button class="button" onclick="appendDisplay('.')">.</button>
+        <button class="button" onclick="appendDisplay('/')">/</button>
+    </div>
+    <div>
+        <button class="button" style="width: 100%;" onclick="clearDisplay()">C</button>
+    </div>
+</div>
+
+<button id="calcolatrice">Apri Calcolatrice</button>
+<div style="position: relative;">
+    <canvas id="drawingCanvas" width="800" height="600"></canvas>
+    <canvas id="selectionCanvas" width="800" height="600" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
+</div>
+
+</body>
+</html>

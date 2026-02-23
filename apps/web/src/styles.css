@@ -1,0 +1,300 @@
+:root {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: #111827;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.whiteboard-app {
+  width: 100%;
+  height: 100%;
+  background: #f8fafc;
+}
+
+.board-scroll-area {
+  width: 100%;
+  height: calc(100vh - 88px);
+  overflow: auto;
+  background: #ffffff;
+  border-bottom: 1px solid #dbe1ea;
+}
+
+.canvas-wrapper {
+  position: relative;
+  min-height: 1600px;
+}
+
+.canvas-wrapper .canvas-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.canvas-wrapper .lower-canvas {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  z-index: 4;
+}
+
+.canvas-wrapper .upper-canvas {
+  z-index: 5;
+}
+
+.selection-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.selection-canvas {
+  pointer-events: none;
+  z-index: 20;
+}
+
+.selection-canvas.enabled {
+  pointer-events: auto;
+}
+
+.page-separators {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 12;
+}
+
+.page-separator {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 24px;
+  background: linear-gradient(to bottom, #d1d5db, #cbd5e1);
+  border-top: 1px solid #b9c4d3;
+  border-bottom: 1px solid #b9c4d3;
+}
+
+.eraser-preview {
+  position: absolute;
+  z-index: 30;
+  display: none;
+  border: 2px solid rgba(17, 24, 39, 0.75);
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  pointer-events: none;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  background: #f1f5f9;
+}
+
+.bottom-toolbar {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  min-height: 88px;
+  border-top: 1px solid #d1dae5;
+  overflow-x: auto;
+}
+
+.toolbar button,
+.toolbar select,
+.toolbar input,
+.toolbar label {
+  font-size: 14px;
+}
+
+button {
+  border: 1px solid #cdd5df;
+  background: #ffffff;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #f8fbff;
+}
+
+.icon-button {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-button i {
+  font-size: 16px;
+  color: #1f2937;
+}
+
+.ocr-button {
+  width: auto;
+  min-width: 108px;
+}
+
+.color-palette {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.color-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 2px solid #cbd5e1;
+  padding: 0;
+}
+
+.color-swatch.selected {
+  outline: 2px solid #334155;
+  outline-offset: 1px;
+}
+
+.size-controls {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.size-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid #d1dae5;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.size-label {
+  font-size: 12px;
+  color: #334155;
+  margin-right: 2px;
+}
+
+.size-chip {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.size-chip.selected {
+  background: #e2efff;
+  border-color: #8fb8f4;
+}
+
+button.active {
+  background: #e2efff;
+  border-color: #8fb8f4;
+}
+
+button.warning {
+  background: #fff5e9;
+  border-color: #f3ba7b;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.toolbar-status {
+  margin-left: auto;
+  white-space: nowrap;
+  color: #334155;
+  font-size: 13px;
+}
+
+.calculator {
+  position: fixed;
+  right: 14px;
+  bottom: 102px;
+  width: 320px;
+  border: 1px solid #d5dce7;
+  border-radius: 12px;
+  padding: 10px;
+  background: #ffffff;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.16);
+  z-index: 40;
+}
+
+.calculator header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.calculator h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.calculator input {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+}
+
+.calculator-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.equals {
+  margin-top: 8px;
+  width: 100%;
+  font-weight: 700;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 900px) {
+  .calculator {
+    width: min(320px, calc(100vw - 20px));
+    right: 10px;
+    bottom: 98px;
+  }
+
+  .toolbar-status {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .size-controls {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
