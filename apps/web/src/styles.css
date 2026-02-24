@@ -50,6 +50,14 @@ body,
   z-index: 4;
 }
 
+.canvas-wrapper.grid-background .lower-canvas {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.35) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.35) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
 .canvas-wrapper .upper-canvas {
   z-index: 5;
 }
@@ -147,6 +155,22 @@ button:hover {
 .icon-button i {
   font-size: 16px;
   color: #1f2937;
+}
+
+.background-grid-button {
+  position: relative;
+}
+
+.grid-icon {
+  width: 18px;
+  height: 18px;
+  border: 1px solid #334155;
+  border-radius: 3px;
+  background-image:
+    linear-gradient(to right, rgba(51, 65, 85, 0.7) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(51, 65, 85, 0.7) 1px, transparent 1px);
+  background-size: 6px 6px;
+  background-color: #ffffff;
 }
 
 .tool-trigger {

@@ -6,6 +6,7 @@ import { exportJournalWorkbook } from "./lib/api";
 
 type Tool = "pen" | "eraser" | "line";
 type SizeLevel = "thin" | "medium" | "large";
+type BackgroundMode = "plain" | "grid";
 
 type Page = {
   id: string;
@@ -32,6 +33,7 @@ type SelectionRect = {
 
 const STORAGE_KEY = "myaccounting.whiteboard.pages.v1";
 const JOURNAL_STORAGE_KEY = "myaccounting.journal.entries.v1";
+const BACKGROUND_STORAGE_KEY = "myaccounting.whiteboard.background.v1";
 const MAX_JOURNAL_ENTRIES = 202;
 const PAGE_HEIGHT = 1600;
 const PAGE_SEPARATOR_HEIGHT = 24;
@@ -115,6 +117,15 @@ function loadInitialJournalEntries(): JournalEntry[] {
     return normalized.length > 0 ? normalized : [createJournalEntry()];
   } catch {
     return [createJournalEntry()];
+  }
+}
+
+function loadInitialBackgroundMode(): BackgroundMode {
+  try {
+    const raw = localStorage.getItem(BACKGROUND_STORAGE_KEY);
+    return raw === "grid" ? "grid" : "plain";
+  } catch {
+    return "plain";
   }
 }
 
@@ -278,6 +289,7 @@ function App() {
   const [isJournalOpen, setIsJournalOpen] = useState(false);
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(() => loadInitialJournalEntries());
+  const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
   const [display, setDisplay] = useState("");
   const [isCanvasReady, setIsCanvasReady] = useState(false);
 
@@ -1442,6 +1454,10 @@ function App() {
     localStorage.setItem(JOURNAL_STORAGE_KEY, JSON.stringify(journalEntries));
   }, [journalEntries]);
 
+  useEffect(() => {
+    localStorage.setItem(BACKGROUND_STORAGE_KEY, backgroundMode);
+  }, [backgroundMode]);
+
   const penSizePopoverStyle = getSizePopoverStyle(penToolRef.current);
   const eraserSizePopoverStyle = getSizePopoverStyle(eraserToolRef.current);
 
@@ -1453,7 +1469,10 @@ function App() {
         onPointerMove={handleBoardPointerMove}
         onPointerLeave={hideEraserPreview}
       >
-        <div className="canvas-wrapper" ref={wrapperRef}>
+        <div
+          className={backgroundMode === "grid" ? "canvas-wrapper grid-background" : "canvas-wrapper"}
+          ref={wrapperRef}
+        >
           <canvas ref={drawingCanvasRef} />
           <canvas
             className={`selection-canvas ${isSelectionMode ? "enabled" : ""}`}
@@ -1610,6 +1629,16 @@ function App() {
         <button className="icon-button" title="Redo" aria-label="Redo" type="button" onClick={() => void redo()}>
           <i className="fa-solid fa-rotate-right" />
           <span className="sr-only">Redo</span>
+        </button>
+        <button
+          className={backgroundMode === "grid" ? "icon-button active background-grid-button" : "icon-button background-grid-button"}
+          title="Sfondo a quadretti"
+          aria-label="Sfondo a quadretti"
+          type="button"
+          onClick={() => setBackgroundMode((value) => (value === "grid" ? "plain" : "grid"))}
+        >
+          <span className="grid-icon" aria-hidden="true" />
+          <span className="sr-only">Sfondo</span>
         </button>
         <button
           className={isJournalOpen ? "active journal-toggle-button" : "journal-toggle-button"}
