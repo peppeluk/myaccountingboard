@@ -47,6 +47,9 @@ const ERASER_DECIMATE = 1.1;
 const SNAPSHOT_NUMBER_PRECISION = 2;
 const PDF_EXPORT_MULTIPLIER = 1.25;
 const PDF_EXPORT_JPEG_QUALITY = 0.72;
+const GRID_BACKGROUND_COLOR = "rgba(148, 163, 184, 0.35)";
+const GRID_BACKGROUND_SIZE = 28;
+const GRID_BACKGROUND_LINE_WIDTH = 1;
 const SIZE_POPOVER_HALF_WIDTH = 72;
 const SIZE_POPOVER_MARGIN = 8;
 const SIZE_LEVELS: Array<{ key: SizeLevel; label: string }> = [
@@ -191,6 +194,36 @@ function getTouchCenter(touches: TouchList): { x: number; y: number } | null {
 function roundForSnapshot(value: number): number {
   const factor = 10 ** SNAPSHOT_NUMBER_PRECISION;
   return Math.round(value * factor) / factor;
+}
+
+function drawGridBackground(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  multiplier: number
+): void {
+  const step = GRID_BACKGROUND_SIZE * multiplier;
+  const lineWidth = GRID_BACKGROUND_LINE_WIDTH * multiplier;
+
+  context.save();
+  context.strokeStyle = GRID_BACKGROUND_COLOR;
+  context.lineWidth = lineWidth;
+  context.beginPath();
+
+  for (let x = 0; x <= width; x += step) {
+    const px = Math.round(x) + 0.5;
+    context.moveTo(px, 0);
+    context.lineTo(px, height);
+  }
+
+  for (let y = 0; y <= height; y += step) {
+    const py = Math.round(y) + 0.5;
+    context.moveTo(0, py);
+    context.lineTo(width, py);
+  }
+
+  context.stroke();
+  context.restore();
 }
 
 function loadInitialDocument(): PersistedDocument {
@@ -921,6 +954,9 @@ function App() {
       }
       flattenedContext.fillStyle = "#ffffff";
       flattenedContext.fillRect(0, 0, flattenedCanvas.width, flattenedCanvas.height);
+      if (backgroundMode === "grid") {
+        drawGridBackground(flattenedContext, flattenedCanvas.width, flattenedCanvas.height, PDF_EXPORT_MULTIPLIER);
+      }
       flattenedContext.drawImage(pageCanvas, 0, 0);
 
       const image = flattenedCanvas.toDataURL("image/jpeg", PDF_EXPORT_JPEG_QUALITY);
@@ -940,7 +976,7 @@ function App() {
     const defaultName = `lavagna_${new Date().toISOString().slice(0, 10)}`;
     const fileName = window.prompt("Nome PDF", defaultName) ?? defaultName;
     doc.save(`${fileName}.pdf`);
-  }, [persistCurrentDocument]);
+  }, [backgroundMode, persistCurrentDocument]);
 
   const undo = useCallback(async () => {
     const undoStack = undoStackRef.current;
