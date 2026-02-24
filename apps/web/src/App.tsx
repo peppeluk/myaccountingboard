@@ -45,6 +45,8 @@ const AUTO_OCR_PADDING = 24;
 const PEN_DECIMATE = 0.6;
 const ERASER_DECIMATE = 1.1;
 const SNAPSHOT_NUMBER_PRECISION = 2;
+const PDF_EXPORT_MULTIPLIER = 1.25;
+const PDF_EXPORT_JPEG_QUALITY = 0.72;
 const SIZE_POPOVER_HALF_WIDTH = 72;
 const SIZE_POPOVER_MARGIN = 8;
 const SIZE_LEVELS: Array<{ key: SizeLevel; label: string }> = [
@@ -901,16 +903,17 @@ function App() {
     }
 
     const { jsPDF } = await import("jspdf");
-    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
 
     for (let i = 0; i < pagesSnapshot.length; i += 1) {
       const image = canvas.toDataURL({
-        format: "png",
+        format: "jpeg",
+        quality: PDF_EXPORT_JPEG_QUALITY,
         left: 0,
         top: getPageTop(i),
         width: canvas.getWidth(),
         height: PAGE_HEIGHT,
-        multiplier: 2
+        multiplier: PDF_EXPORT_MULTIPLIER
       });
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
@@ -922,7 +925,7 @@ function App() {
       if (i > 0) {
         doc.addPage();
       }
-      doc.addImage(image, "PNG", 15, y, drawWidth, drawHeight);
+      doc.addImage(image, "JPEG", 15, y, drawWidth, drawHeight, undefined, "MEDIUM");
     }
 
     const defaultName = `lavagna_${new Date().toISOString().slice(0, 10)}`;
