@@ -3,6 +3,7 @@ import type { Canvas as FabricCanvas, Line as FabricLine } from "fabric";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
+import { loadLastBoardDocument, saveLastBoardDocument } from "./lib/boardStorage";
 
 type Tool = "pen" | "eraser" | "line" | "pan";
 type SizeLevel = "thin" | "medium" | "large";
@@ -31,7 +32,7 @@ type SelectionRect = {
   height: number;
 };
 
-const STORAGE_KEY = "myaccounting.whiteboard.pages.v1";
+const LEGACY_STORAGE_KEY = "myaccounting.whiteboard.pages.v1";
 const JOURNAL_STORAGE_KEY = "myaccounting.journal.entries.v1";
 const BACKGROUND_STORAGE_KEY = "myaccounting.whiteboard.background.v1";
 const MAX_JOURNAL_ENTRIES = 202;
@@ -50,6 +51,7 @@ const PDF_EXPORT_JPEG_QUALITY = 0.72;
 const GRID_BACKGROUND_COLOR = "rgba(148, 163, 184, 0.35)";
 const GRID_BACKGROUND_SIZE = 28;
 const GRID_BACKGROUND_LINE_WIDTH = 1;
+const DOCUMENT_SAVE_DEBOUNCE_MS = 750;
 const SIZE_POPOVER_HALF_WIDTH = 72;
 const SIZE_POPOVER_MARGIN = 8;
 const SIZE_LEVELS: Array<{ key: SizeLevel; label: string }> = [
@@ -226,11 +228,11 @@ function drawGridBackground(
   context.restore();
 }
 
-function loadInitialDocument(): PersistedDocument {
+function loadLegacyDocumentFromLocalStorage(): PersistedDocument | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) {
-      return { pages: [createPage(0)], canvasData: null };
+      return null;
     }
     const parsed = JSON.parse(raw) as unknown;
 
@@ -254,14 +256,16 @@ function loadInitialDocument(): PersistedDocument {
           ? ((parsed[0] as { canvasData?: string }).canvasData ?? null)
           : null;
 
-      return {
-        pages: legacyPages.length > 0 ? legacyPages : [createPage(0)],
-        canvasData
-      };
+      return legacyPages.length > 0
+        ? {
+            pages: legacyPages,
+            canvasData
+          }
+        : null;
     }
 
     if (!parsed || typeof parsed !== "object") {
-      return { pages: [createPage(0)], canvasData: null };
+      return null;
     }
 
     const persisted = parsed as Partial<PersistedDocument>;
@@ -280,13 +284,21 @@ function loadInitialDocument(): PersistedDocument {
           .filter((item): item is Page => item !== null)
       : [];
 
+    if (normalizedPages.length === 0) {
+      return null;
+    }
+
     return {
-      pages: normalizedPages.length > 0 ? normalizedPages : [createPage(0)],
+      pages: normalizedPages,
       canvasData: typeof persisted.canvasData === "string" ? persisted.canvasData : null
     };
   } catch {
-    return { pages: [createPage(0)], canvasData: null };
+    return null;
   }
+}
+
+function loadInitialDocument(): PersistedDocument {
+  return { pages: [createPage(0)], canvasData: null };
 }
 
 function normalizeExpression(input: string): string {
@@ -394,6 +406,9 @@ function App() {
   const pagesRef = useRef<Page[]>(pages);
   const canvasDataRef = useRef<string | null>(initialDocumentRef.current.canvasData);
   const currentPageIndexRef = useRef(currentPageIndex);
+  const pendingDocumentSaveRef = useRef<PersistedDocument | null>(null);
+  const documentSaveTimeoutRef = useRef<number | null>(null);
+  const hasHydratedFromIndexedDbRef = useRef(false);
   const undoStackRef = useRef<string[]>([]);
   const redoStackRef = useRef<string[]>([]);
   const isRestoringRef = useRef(false);
@@ -421,18 +436,71 @@ function App() {
     canvas.calcOffset();
   }, []);
 
+  const flushDocumentSave = useCallback(() => {
+    const pendingDocument = pendingDocumentSaveRef.current;
+    if (!pendingDocument) {
+      return;
+    }
+    pendingDocumentSaveRef.current = null;
+    void saveLastBoardDocument(pendingDocument).catch(() => {
+      try {
+        localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(pendingDocument));
+      } catch {
+        // Ignore fallback write errors.
+      }
+    });
+  }, []);
+
+  const flushPendingDocumentSaveNow = useCallback(() => {
+    if (documentSaveTimeoutRef.current !== null) {
+      window.clearTimeout(documentSaveTimeoutRef.current);
+      documentSaveTimeoutRef.current = null;
+    }
+
+    const pendingDocument = pendingDocumentSaveRef.current;
+    if (!pendingDocument) {
+      return;
+    }
+    pendingDocumentSaveRef.current = null;
+
+    try {
+      localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(pendingDocument));
+    } catch {
+      // Ignore fallback write errors.
+    }
+
+    void saveLastBoardDocument(pendingDocument).catch(() => {
+      try {
+        localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(pendingDocument));
+      } catch {
+        // Ignore fallback write errors.
+      }
+    });
+  }, []);
+
+  const scheduleDocumentSave = useCallback(
+    (document: PersistedDocument) => {
+      pendingDocumentSaveRef.current = document;
+      if (documentSaveTimeoutRef.current !== null) {
+        window.clearTimeout(documentSaveTimeoutRef.current);
+      }
+      documentSaveTimeoutRef.current = window.setTimeout(() => {
+        documentSaveTimeoutRef.current = null;
+        flushDocumentSave();
+      }, DOCUMENT_SAVE_DEBOUNCE_MS);
+    },
+    [flushDocumentSave]
+  );
+
   const persistDocument = useCallback((nextPages: Page[], nextCanvasData: string | null) => {
     pagesRef.current = nextPages;
     canvasDataRef.current = nextCanvasData;
     setPages(nextPages);
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        pages: nextPages,
-        canvasData: nextCanvasData
-      } satisfies PersistedDocument)
-    );
-  }, []);
+    scheduleDocumentSave({
+      pages: nextPages,
+      canvasData: nextCanvasData
+    } satisfies PersistedDocument);
+  }, [scheduleDocumentSave]);
 
   const snapshotCanvas = useCallback((): string | null => {
     const canvas = fabricCanvasRef.current;
@@ -595,6 +663,26 @@ function App() {
     }
     persistDocument(pagesRef.current, snapshot);
   }, [persistDocument, snapshotCanvas]);
+
+  const applyPersistedDocument = useCallback(
+    async (document: PersistedDocument) => {
+      const normalizedPages = document.pages.length > 0 ? document.pages : [createPage(0)];
+      pagesRef.current = normalizedPages;
+      canvasDataRef.current = document.canvasData;
+      currentPageIndexRef.current = 0;
+      setCurrentPageIndex(0);
+      setPages(normalizedPages);
+
+      if (!fabricCanvasRef.current) {
+        return;
+      }
+
+      await loadCanvasData(document.canvasData);
+      resetHistory();
+      containerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    },
+    [loadCanvasData, resetHistory]
+  );
 
   const pushHistoryState = useCallback(() => {
     if (isRestoringRef.current) {
@@ -1444,6 +1532,62 @@ function App() {
       setIsCanvasReady(false);
     };
   }, [applyBrushSettings, detachToolHandlers, handlePathCreated, loadCanvasData, pushHistoryState, resetHistory, resizeCanvas, syncCanvasOffset]);
+
+  useEffect(() => {
+    if (hasHydratedFromIndexedDbRef.current) {
+      return;
+    }
+    hasHydratedFromIndexedDbRef.current = true;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const indexedDocument = await loadLastBoardDocument();
+        if (cancelled) {
+          return;
+        }
+        if (indexedDocument) {
+          await applyPersistedDocument(indexedDocument);
+          return;
+        }
+      } catch {
+        // Keep legacy fallback silently.
+      }
+
+      const legacyDocument = loadLegacyDocumentFromLocalStorage();
+      if (legacyDocument) {
+        await applyPersistedDocument(legacyDocument);
+        void saveLastBoardDocument(legacyDocument)
+          .then(() => {
+            try {
+              localStorage.removeItem(LEGACY_STORAGE_KEY);
+            } catch {
+              // Ignore cleanup errors.
+            }
+          })
+          .catch(() => undefined);
+        return;
+      }
+
+      void saveLastBoardDocument(initialDocumentRef.current).catch(() => undefined);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyPersistedDocument]);
+
+  useEffect(() => {
+    const flushOnPageHide = () => {
+      flushPendingDocumentSaveNow();
+    };
+
+    window.addEventListener("pagehide", flushOnPageHide);
+    return () => {
+      window.removeEventListener("pagehide", flushOnPageHide);
+      flushOnPageHide();
+    };
+  }, [flushPendingDocumentSaveNow]);
 
   useEffect(() => {
     if (!isCanvasReady) {
