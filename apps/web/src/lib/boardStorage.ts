@@ -8,6 +8,13 @@ export type BoardDocument = {
   canvasData: string | null;
 };
 
+export type ArchivedBoardDocument = {
+  id: string;
+  fileName: string;
+  updatedAt: number;
+  pageCount: number;
+};
+
 type StoredBoardRecord = {
   id: string;
   format: "mbd-json-v1";
@@ -20,6 +27,7 @@ const DATABASE_NAME = "myaccounting-board";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "documents";
 const LAST_OPENED_DOCUMENT_KEY = "last_opened";
+const ARCHIVE_KEY_PREFIX = "archive:";
 
 let databasePromise: Promise<IDBDatabase> | null = null;
 
@@ -29,13 +37,20 @@ function pad(value: number): string {
 
 function buildBoardFileName(timestamp: number): string {
   const date = new Date(timestamp);
-  const y = date.getFullYear();
   const m = pad(date.getMonth() + 1);
   const d = pad(date.getDate());
   const h = pad(date.getHours());
   const min = pad(date.getMinutes());
   const s = pad(date.getSeconds());
-  return `myboard_data_${y}${m}${d}_${h}${min}${s}.mbd`;
+  return `MA_${d}${m}_${h}${min}${s}.mbd`;
+}
+
+function isArchiveKey(value: string): boolean {
+  return value.startsWith(ARCHIVE_KEY_PREFIX);
+}
+
+function buildArchiveKey(timestamp: number): string {
+  return `${ARCHIVE_KEY_PREFIX}${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function normalizeBoardDocument(input: unknown): BoardDocument | null {
@@ -148,6 +163,133 @@ export async function saveLastBoardDocument(document: BoardDocument): Promise<vo
     };
     transaction.onerror = () => {
       reject(transaction.error ?? new Error("Salvataggio IndexedDB fallito"));
+    };
+    transaction.onabort = () => {
+      reject(transaction.error ?? new Error("Transazione IndexedDB annullata"));
+    };
+  });
+}
+
+export async function archiveBoardDocument(document: BoardDocument): Promise<string | null> {
+  const normalized = normalizeBoardDocument(document);
+  if (!normalized || normalized.pages.length === 0) {
+    return null;
+  }
+
+  const now = Date.now();
+  const key = buildArchiveKey(now);
+  const record: StoredBoardRecord = {
+    id: key,
+    format: "mbd-json-v1",
+    fileName: buildBoardFileName(now),
+    updatedAt: now,
+    data: normalized
+  };
+
+  const database = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    store.put(record, key);
+
+    transaction.oncomplete = () => {
+      resolve();
+    };
+    transaction.onerror = () => {
+      reject(transaction.error ?? new Error("Archiviazione IndexedDB fallita"));
+    };
+    transaction.onabort = () => {
+      reject(transaction.error ?? new Error("Transazione IndexedDB annullata"));
+    };
+  });
+
+  return key;
+}
+
+export async function listArchivedBoardDocuments(): Promise<ArchivedBoardDocument[]> {
+  const database = await openDatabase();
+  return await new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.getAll();
+
+    request.onsuccess = () => {
+      const rows = Array.isArray(request.result) ? (request.result as StoredBoardRecord[]) : [];
+      const items = rows
+        .filter(
+          (row) =>
+            row &&
+            typeof row.id === "string" &&
+            isArchiveKey(row.id) &&
+            typeof row.fileName === "string" &&
+            typeof row.updatedAt === "number" &&
+            row.data &&
+            Array.isArray(row.data.pages)
+        )
+        .map((row) => ({
+          id: row.id,
+          fileName: row.fileName,
+          updatedAt: row.updatedAt,
+          pageCount: row.data.pages.length
+        }))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+
+      resolve(items);
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Lettura archivio IndexedDB fallita"));
+    };
+  });
+}
+
+export async function loadArchivedBoardDocument(id: string): Promise<BoardDocument | null> {
+  if (!isArchiveKey(id)) {
+    return null;
+  }
+
+  const database = await openDatabase();
+  return await new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(id);
+
+    request.onsuccess = () => {
+      const row = request.result as StoredBoardRecord | undefined;
+      if (!row || typeof row !== "object") {
+        resolve(null);
+        return;
+      }
+      const normalized = normalizeBoardDocument(row.data);
+      if (!normalized || normalized.pages.length === 0) {
+        resolve(null);
+        return;
+      }
+      resolve(normalized);
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Lettura documento archivio fallita"));
+    };
+  });
+}
+
+export async function deleteArchivedBoardDocument(id: string): Promise<void> {
+  if (!isArchiveKey(id)) {
+    return;
+  }
+
+  const database = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    store.delete(id);
+
+    transaction.oncomplete = () => {
+      resolve();
+    };
+    transaction.onerror = () => {
+      reject(transaction.error ?? new Error("Cancellazione documento archivio fallita"));
     };
     transaction.onabort = () => {
       reject(transaction.error ?? new Error("Transazione IndexedDB annullata"));

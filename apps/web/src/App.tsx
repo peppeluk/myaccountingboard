@@ -3,7 +3,15 @@ import type { Canvas as FabricCanvas, Line as FabricLine } from "fabric";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
-import { loadLastBoardDocument, saveLastBoardDocument } from "./lib/boardStorage";
+import {
+  archiveBoardDocument,
+  deleteArchivedBoardDocument,
+  listArchivedBoardDocuments,
+  loadArchivedBoardDocument,
+  loadLastBoardDocument,
+  saveLastBoardDocument,
+  type ArchivedBoardDocument
+} from "./lib/boardStorage";
 
 type Tool = "pen" | "eraser" | "line" | "pan";
 type SizeLevel = "thin" | "medium" | "large";
@@ -362,6 +370,23 @@ function mergeRecognizedText(previous: string, nextChunk: string): string {
   return `${previous}${nextChunk}`;
 }
 
+function formatArchiveDateTime(timestamp: number): string {
+  return new Intl.DateTimeFormat("it-IT", {
+    dateStyle: "short",
+    timeStyle: "medium"
+  }).format(new Date(timestamp));
+}
+
+function buildDocumentBaseName(timestamp: number): string {
+  const date = new Date(timestamp);
+  const d = String(date.getDate()).padStart(2, "0");
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const h = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  const s = String(date.getSeconds()).padStart(2, "0");
+  return `MA_${d}${m}_${h}${min}${s}`;
+}
+
 function App() {
   const initialDocumentRef = useRef<PersistedDocument>(loadInitialDocument());
   const [pages, setPages] = useState<Page[]>(() => initialDocumentRef.current.pages);
@@ -378,6 +403,10 @@ function App() {
   const [ocrStatus, setOcrStatus] = useState("OCR spento");
   const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
   const [isJournalOpen, setIsJournalOpen] = useState(false);
+  const [isArchiveOpen, setIsArchiveOpen] = useState(false);
+  const [archiveEntries, setArchiveEntries] = useState<ArchivedBoardDocument[]>([]);
+  const [isArchiveLoading, setIsArchiveLoading] = useState(false);
+  const [archiveMessage, setArchiveMessage] = useState("");
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(() => loadInitialJournalEntries());
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
@@ -409,6 +438,7 @@ function App() {
   const pendingDocumentSaveRef = useRef<PersistedDocument | null>(null);
   const documentSaveTimeoutRef = useRef<number | null>(null);
   const hasHydratedFromIndexedDbRef = useRef(false);
+  const hasArchivedOnExitRef = useRef(false);
   const undoStackRef = useRef<string[]>([]);
   const redoStackRef = useRef<string[]>([]);
   const isRestoringRef = useRef(false);
@@ -683,6 +713,89 @@ function App() {
     },
     [loadCanvasData, resetHistory]
   );
+
+  const buildCurrentDocumentSnapshot = useCallback((): PersistedDocument => {
+    const normalizedPages = pagesRef.current.length > 0 ? pagesRef.current : [createPage(0)];
+    const snapshot = snapshotCanvas();
+    return {
+      pages: normalizedPages,
+      canvasData: snapshot ?? canvasDataRef.current
+    };
+  }, [snapshotCanvas]);
+
+  const loadArchiveEntries = useCallback(async () => {
+    setIsArchiveLoading(true);
+    try {
+      const items = await listArchivedBoardDocuments();
+      setArchiveEntries(items);
+    } catch {
+      setArchiveMessage("Archivio non disponibile");
+    } finally {
+      setIsArchiveLoading(false);
+    }
+  }, []);
+
+  const openArchiveDocument = useCallback(
+    async (archiveId: string) => {
+      setArchiveMessage("");
+      try {
+        const archivedDocument = await loadArchivedBoardDocument(archiveId);
+        if (!archivedDocument) {
+          setArchiveMessage("Documento archivio non trovato");
+          return;
+        }
+        await applyPersistedDocument(archivedDocument);
+        void saveLastBoardDocument(archivedDocument).catch(() => undefined);
+        setIsArchiveOpen(false);
+      } catch {
+        setArchiveMessage("Apertura archivio fallita");
+      }
+    },
+    [applyPersistedDocument]
+  );
+
+  const removeArchiveDocument = useCallback(
+    async (archiveId: string) => {
+      try {
+        await deleteArchivedBoardDocument(archiveId);
+        await loadArchiveEntries();
+      } catch {
+        setArchiveMessage("Cancellazione archivio fallita");
+      }
+    },
+    [loadArchiveEntries]
+  );
+
+  const archiveCurrentDocument = useCallback(
+    async (silent: boolean) => {
+      const currentDocument = buildCurrentDocumentSnapshot();
+      try {
+        const archivedKey = await archiveBoardDocument(currentDocument);
+        if (!archivedKey || silent) {
+          return;
+        }
+        await loadArchiveEntries();
+        setArchiveMessage("Documento archiviato");
+      } catch {
+        if (!silent) {
+          setArchiveMessage("Archiviazione fallita");
+        }
+      }
+    },
+    [buildCurrentDocumentSnapshot, loadArchiveEntries]
+  );
+
+  const saveAndArchiveOnExit = useCallback(() => {
+    const currentDocument = buildCurrentDocumentSnapshot();
+    pendingDocumentSaveRef.current = currentDocument;
+    flushPendingDocumentSaveNow();
+
+    if (hasArchivedOnExitRef.current) {
+      return;
+    }
+    hasArchivedOnExitRef.current = true;
+    void archiveBoardDocument(currentDocument).catch(() => undefined);
+  }, [buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow]);
 
   const pushHistoryState = useCallback(() => {
     if (isRestoringRef.current) {
@@ -1081,8 +1194,9 @@ function App() {
       doc.addImage(image, "JPEG", 15, y, drawWidth, drawHeight, undefined, "MEDIUM");
     }
 
-    const defaultName = `lavagna_${new Date().toISOString().slice(0, 10)}`;
-    const fileName = window.prompt("Nome PDF", defaultName) ?? defaultName;
+    const defaultName = buildDocumentBaseName(Date.now());
+    const promptedName = window.prompt("Nome PDF", defaultName);
+    const fileName = (promptedName ?? defaultName).trim() || defaultName;
     doc.save(`${fileName}.pdf`);
   }, [backgroundMode, persistCurrentDocument]);
 
@@ -1598,16 +1712,26 @@ function App() {
   }, [applyPersistedDocument]);
 
   useEffect(() => {
-    const flushOnPageHide = () => {
-      flushPendingDocumentSaveNow();
+    const handleAppExit = () => {
+      saveAndArchiveOnExit();
     };
 
-    window.addEventListener("pagehide", flushOnPageHide);
+    window.addEventListener("pagehide", handleAppExit);
+    window.addEventListener("beforeunload", handleAppExit);
     return () => {
-      window.removeEventListener("pagehide", flushOnPageHide);
-      flushOnPageHide();
+      window.removeEventListener("pagehide", handleAppExit);
+      window.removeEventListener("beforeunload", handleAppExit);
+      handleAppExit();
     };
-  }, [flushPendingDocumentSaveNow]);
+  }, [saveAndArchiveOnExit]);
+
+  useEffect(() => {
+    if (!isArchiveOpen) {
+      return;
+    }
+    setArchiveMessage("");
+    void loadArchiveEntries();
+  }, [isArchiveOpen, loadArchiveEntries]);
 
   useEffect(() => {
     if (!isCanvasReady) {
@@ -2084,6 +2208,16 @@ function App() {
           <span>giornale_data</span>
         </button>
         <button
+          className={isArchiveOpen ? "icon-button active" : "icon-button"}
+          title="Archivio"
+          aria-label="Archivio"
+          type="button"
+          onClick={() => setIsArchiveOpen((value) => !value)}
+        >
+          <i className="fa-solid fa-box-archive" />
+          <span className="sr-only">Archivio</span>
+        </button>
+        <button
           className="icon-button"
           title="Calcolatrice"
           aria-label="Calcolatrice"
@@ -2153,6 +2287,85 @@ function App() {
         onRemoveEntry={removeJournalEntry}
         onUpdateEntry={updateJournalEntry}
       />
+
+      {isArchiveOpen && (
+        <section className="archive-panel">
+          <header className="archive-panel-header">
+            <h3>Archivio documenti</h3>
+            <div className="archive-panel-actions">
+              <button
+                className="icon-button"
+                type="button"
+                title="Archivia ora"
+                aria-label="Archivia ora"
+                onClick={() => void archiveCurrentDocument(false)}
+              >
+                <i className="fa-solid fa-box-archive" />
+                <span className="sr-only">Archivia ora</span>
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                title="Aggiorna"
+                aria-label="Aggiorna"
+                onClick={() => void loadArchiveEntries()}
+              >
+                <i className="fa-solid fa-rotate" />
+                <span className="sr-only">Aggiorna</span>
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                title="Chiudi archivio"
+                aria-label="Chiudi archivio"
+                onClick={() => setIsArchiveOpen(false)}
+              >
+                <i className="fa-solid fa-xmark" />
+                <span className="sr-only">Chiudi archivio</span>
+              </button>
+            </div>
+          </header>
+          <div className="archive-panel-body">
+            {isArchiveLoading && <p className="archive-empty">Caricamento archivio...</p>}
+            {!isArchiveLoading && archiveEntries.length === 0 && (
+              <p className="archive-empty">Nessun documento archiviato.</p>
+            )}
+            {!isArchiveLoading && archiveEntries.length > 0 && (
+              <div className="archive-list">
+                {archiveEntries.map((entry) => (
+                  <article className="archive-item" key={entry.id}>
+                    <button
+                      className="archive-open-button"
+                      type="button"
+                      onClick={() => void openArchiveDocument(entry.id)}
+                      title={`Apri ${entry.fileName}`}
+                      aria-label={`Apri ${entry.fileName}`}
+                    >
+                      <strong>{entry.fileName}</strong>
+                      <span>{formatArchiveDateTime(entry.updatedAt)}</span>
+                      <span>{entry.pageCount} pagine</span>
+                    </button>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      title="Elimina dall'archivio"
+                      aria-label="Elimina dall'archivio"
+                      onClick={() => void removeArchiveDocument(entry.id)}
+                    >
+                      <i className="fa-solid fa-trash" />
+                      <span className="sr-only">Elimina dall'archivio</span>
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+          <footer className="archive-panel-footer">
+            <span>Salvataggio automatico in uscita attivo.</span>
+            {archiveMessage && <span>{archiveMessage}</span>}
+          </footer>
+        </section>
+      )}
 
       {isCalculatorOpen && (
         <section className="calculator">
