@@ -906,15 +906,24 @@ function App() {
     const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
 
     for (let i = 0; i < pagesSnapshot.length; i += 1) {
-      const image = canvas.toDataURL({
-        format: "jpeg",
-        quality: PDF_EXPORT_JPEG_QUALITY,
+      const pageCanvas = canvas.toCanvasElement(PDF_EXPORT_MULTIPLIER, {
         left: 0,
         top: getPageTop(i),
         width: canvas.getWidth(),
-        height: PAGE_HEIGHT,
-        multiplier: PDF_EXPORT_MULTIPLIER
+        height: PAGE_HEIGHT
       });
+      const flattenedCanvas = document.createElement("canvas");
+      flattenedCanvas.width = pageCanvas.width;
+      flattenedCanvas.height = pageCanvas.height;
+      const flattenedContext = flattenedCanvas.getContext("2d");
+      if (!flattenedContext) {
+        continue;
+      }
+      flattenedContext.fillStyle = "#ffffff";
+      flattenedContext.fillRect(0, 0, flattenedCanvas.width, flattenedCanvas.height);
+      flattenedContext.drawImage(pageCanvas, 0, 0);
+
+      const image = flattenedCanvas.toDataURL("image/jpeg", PDF_EXPORT_JPEG_QUALITY);
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const ratio = canvas.getWidth() / PAGE_HEIGHT;
