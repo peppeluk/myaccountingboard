@@ -1015,6 +1015,10 @@ function App() {
     if (!canvas) {
       return;
     }
+    const sourceCanvas = (canvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl;
+    if (!sourceCanvas) {
+      return;
+    }
 
     persistCurrentDocument();
 
@@ -1025,17 +1029,15 @@ function App() {
 
     const { jsPDF } = await import("jspdf");
     const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
+    const canvasWidth = Math.max(1, canvas.getWidth());
+    const canvasHeight = Math.max(1, canvas.getHeight());
+    const sourceScaleX = sourceCanvas.width / canvasWidth;
+    const sourceScaleY = sourceCanvas.height / canvasHeight;
 
     for (let i = 0; i < pagesSnapshot.length; i += 1) {
-      const pageCanvas = canvas.toCanvasElement(PDF_EXPORT_MULTIPLIER, {
-        left: 0,
-        top: getPageTop(i),
-        width: canvas.getWidth(),
-        height: PAGE_HEIGHT
-      });
       const flattenedCanvas = document.createElement("canvas");
-      flattenedCanvas.width = pageCanvas.width;
-      flattenedCanvas.height = pageCanvas.height;
+      flattenedCanvas.width = Math.max(1, Math.round(canvasWidth * PDF_EXPORT_MULTIPLIER));
+      flattenedCanvas.height = Math.max(1, Math.round(PAGE_HEIGHT * PDF_EXPORT_MULTIPLIER));
       const flattenedContext = flattenedCanvas.getContext("2d");
       if (!flattenedContext) {
         continue;
@@ -1045,12 +1047,30 @@ function App() {
       if (backgroundMode === "grid") {
         drawGridBackground(flattenedContext, flattenedCanvas.width, flattenedCanvas.height, PDF_EXPORT_MULTIPLIER);
       }
-      flattenedContext.drawImage(pageCanvas, 0, 0);
+      const sourceTop = getPageTop(i);
+      const sx = 0;
+      const sy = Math.max(0, Math.round(sourceTop * sourceScaleY));
+      const sw = Math.max(1, Math.round(canvasWidth * sourceScaleX));
+      const sh = Math.max(
+        1,
+        Math.min(Math.round(PAGE_HEIGHT * sourceScaleY), Math.max(1, sourceCanvas.height - sy))
+      );
+      flattenedContext.drawImage(
+        sourceCanvas,
+        sx,
+        sy,
+        sw,
+        sh,
+        0,
+        0,
+        flattenedCanvas.width,
+        flattenedCanvas.height
+      );
 
       const image = flattenedCanvas.toDataURL("image/jpeg", PDF_EXPORT_JPEG_QUALITY);
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
-      const ratio = canvas.getWidth() / PAGE_HEIGHT;
+      const ratio = canvasWidth / PAGE_HEIGHT;
       const drawWidth = pageWidth - 30;
       const drawHeight = drawWidth / ratio;
       const y = Math.max(15, (pageHeight - drawHeight) / 2);
