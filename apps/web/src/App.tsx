@@ -42,6 +42,9 @@ const AUTO_ADD_SCROLL_THRESHOLD = 120;
 const TOOL_LONG_PRESS_MS = 420;
 const AUTO_OCR_DEBOUNCE_MS = 550;
 const AUTO_OCR_PADDING = 24;
+const PEN_DECIMATE = 0.6;
+const ERASER_DECIMATE = 1.1;
+const SNAPSHOT_NUMBER_PRECISION = 2;
 const SIZE_POPOVER_HALF_WIDTH = 72;
 const SIZE_POPOVER_MARGIN = 8;
 const SIZE_LEVELS: Array<{ key: SizeLevel; label: string }> = [
@@ -181,6 +184,11 @@ function getTouchCenter(touches: TouchList): { x: number; y: number } | null {
     x: (first.clientX + second.clientX) / 2,
     y: (first.clientY + second.clientY) / 2
   };
+}
+
+function roundForSnapshot(value: number): number {
+  const factor = 10 ** SNAPSHOT_NUMBER_PRECISION;
+  return Math.round(value * factor) / factor;
 }
 
 function loadInitialDocument(): PersistedDocument {
@@ -396,7 +404,13 @@ function App() {
     if (!canvas) {
       return null;
     }
-    return JSON.stringify(canvas.toJSON());
+    const json = canvas.toJSON();
+    return JSON.stringify(json, (_key, value: unknown) => {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return roundForSnapshot(value);
+      }
+      return value;
+    });
   }, []);
 
   const applyBrushSettings = useCallback(() => {
@@ -422,7 +436,7 @@ function App() {
     }
     brush.color = color;
     brush.width = penStrokeWidth;
-    brush.decimate = 0;
+    brush.decimate = PEN_DECIMATE;
   }, [color, penStrokeWidth]);
 
   const clearSelectionOverlay = useCallback(() => {
@@ -651,67 +665,39 @@ function App() {
       return;
     }
 
+    if (tool === "eraser") {
+      if (!fabricModule) {
+        return;
+      }
+
+      class EraserBrush extends fabricModule.PencilBrush {
+        _setBrushStyles(ctx: CanvasRenderingContext2D): void {
+          super._setBrushStyles(ctx);
+          ctx.globalCompositeOperation = "destination-out";
+        }
+      }
+
+      const eraserBrush = new EraserBrush(canvas);
+      canvas.freeDrawingBrush = eraserBrush as FabricCanvas["freeDrawingBrush"];
+      const brush = canvas.freeDrawingBrush as (FabricCanvas["freeDrawingBrush"] & {
+        decimate?: number;
+      }) | undefined;
+      if (!brush) {
+        return;
+      }
+      brush.color = "#000000";
+      brush.width = eraserStrokeWidth;
+      brush.decimate = ERASER_DECIMATE;
+      canvas.isDrawingMode = true;
+      canvas.selection = false;
+      return;
+    }
+
     canvas.isDrawingMode = false;
     canvas.selection = false;
     const topContext = (canvas as unknown as { contextTop?: CanvasRenderingContext2D }).contextTop;
     if (topContext) {
       topContext.globalCompositeOperation = "source-over";
-    }
-
-    if (tool === "eraser") {
-      let isErasing = false;
-      let lastPoint: { x: number; y: number } | null = null;
-
-      const drawEraserSegment = (x1: number, y1: number, x2: number, y2: number) => {
-        if (!fabricModule) {
-          return;
-        }
-        const segment = new fabricModule.Line([x1, y1, x2, y2], {
-          stroke: "rgba(0,0,0,1)",
-          strokeWidth: eraserStrokeWidth,
-          strokeLineCap: "round",
-          strokeLineJoin: "round",
-          globalCompositeOperation: "destination-out",
-          selectable: false,
-          evented: false
-        });
-        canvas.add(segment);
-      };
-
-      const down = (event: unknown) => {
-        const opt = event as { e: MouseEvent };
-        const pointer = canvas.getPointer(opt.e);
-        isErasing = true;
-        lastPoint = pointer;
-        drawEraserSegment(pointer.x, pointer.y, pointer.x + 0.01, pointer.y + 0.01);
-        canvas.requestRenderAll();
-      };
-
-      const move = (event: unknown) => {
-        if (!isErasing || !lastPoint) {
-          return;
-        }
-        const opt = event as { e: MouseEvent };
-        const pointer = canvas.getPointer(opt.e);
-        drawEraserSegment(lastPoint.x, lastPoint.y, pointer.x, pointer.y);
-        lastPoint = pointer;
-        canvas.requestRenderAll();
-      };
-
-      const up = () => {
-        if (!isErasing) {
-          return;
-        }
-        isErasing = false;
-        lastPoint = null;
-        pushHistoryState();
-      };
-
-      canvas.on("mouse:down", down);
-      canvas.on("mouse:move", move);
-      canvas.on("mouse:up", up);
-      toolHandlersRef.current = { down, move, up };
-      return;
     }
 
     if (tool === "pan") {
