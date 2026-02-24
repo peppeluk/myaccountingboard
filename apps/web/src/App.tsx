@@ -4,7 +4,7 @@ import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
 
-type Tool = "pen" | "eraser" | "line";
+type Tool = "pen" | "eraser" | "line" | "pan";
 type SizeLevel = "thin" | "medium" | "large";
 type BackgroundMode = "plain" | "grid";
 
@@ -148,6 +148,41 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function getClientPositionFromEvent(rawEvent: Event): { x: number; y: number } | null {
+  if (rawEvent instanceof MouseEvent) {
+    return {
+      x: rawEvent.clientX,
+      y: rawEvent.clientY
+    };
+  }
+  if (typeof TouchEvent !== "undefined" && rawEvent instanceof TouchEvent) {
+    const touch = rawEvent.touches[0] ?? rawEvent.changedTouches[0];
+    if (!touch) {
+      return null;
+    }
+    return {
+      x: touch.clientX,
+      y: touch.clientY
+    };
+  }
+  return null;
+}
+
+function getTouchCenter(touches: TouchList): { x: number; y: number } | null {
+  if (touches.length < 2) {
+    return null;
+  }
+  const first = touches.item(0);
+  const second = touches.item(1);
+  if (!first || !second) {
+    return null;
+  }
+  return {
+    x: (first.clientX + second.clientX) / 2,
+    y: (first.clientY + second.clientY) / 2
+  };
+}
+
 function loadInitialDocument(): PersistedDocument {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -282,9 +317,10 @@ function App() {
   const [eraserSizeLevel, setEraserSizeLevel] = useState<SizeLevel>("medium");
   const [isPenSizeMenuOpen, setIsPenSizeMenuOpen] = useState(false);
   const [isEraserSizeMenuOpen, setIsEraserSizeMenuOpen] = useState(false);
+  const [isOcrEnabled, setIsOcrEnabled] = useState(false);
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [isOcrRunning, setIsOcrRunning] = useState(false);
-  const [ocrStatus, setOcrStatus] = useState("OCR pronto");
+  const [ocrStatus, setOcrStatus] = useState("OCR spento");
   const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
   const [isJournalOpen, setIsJournalOpen] = useState(false);
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
@@ -323,6 +359,7 @@ function App() {
   const suppressToolClickRef = useRef(false);
   const autoOcrTimeoutRef = useRef<number | null>(null);
   const autoOcrRectRef = useRef<SelectionRect | null>(null);
+  const isOcrEnabledRef = useRef(false);
   const isAutoOcrBusyRef = useRef(false);
   const lastOcrChunkRef = useRef<string>("");
   const clearAutoOcrScheduleRef = useRef<() => void>(() => undefined);
@@ -562,7 +599,7 @@ function App() {
       fabricCanvasRef.current?.requestRenderAll();
       pushHistoryState();
 
-      if (activeToolRef.current === "pen" && path?.getBoundingRect) {
+      if (activeToolRef.current === "pen" && path?.getBoundingRect && isOcrEnabledRef.current) {
         const rect = path.getBoundingRect({ absolute: true, stroke: true });
         scheduleAutoOcrForRectRef.current(rect);
       }
@@ -592,9 +629,11 @@ function App() {
   const configureActiveTool = useCallback(() => {
     const canvas = fabricCanvasRef.current;
     const fabricModule = fabricModuleRef.current;
+    const container = containerRef.current;
     if (!canvas) {
       return;
     }
+    container?.classList.remove("is-panning");
     syncCanvasOffset();
     activeToolRef.current = tool;
 
@@ -666,6 +705,61 @@ function App() {
         isErasing = false;
         lastPoint = null;
         pushHistoryState();
+      };
+
+      canvas.on("mouse:down", down);
+      canvas.on("mouse:move", move);
+      canvas.on("mouse:up", up);
+      toolHandlersRef.current = { down, move, up };
+      return;
+    }
+
+    if (tool === "pan") {
+      let isPanning = false;
+      let startX = 0;
+      let startY = 0;
+      let startScrollLeft = 0;
+      let startScrollTop = 0;
+
+      const down = (event: unknown) => {
+        const opt = event as { e: Event };
+        const rawEvent = opt.e;
+        if (rawEvent instanceof MouseEvent && rawEvent.button !== 0) {
+          return;
+        }
+        const position = getClientPositionFromEvent(rawEvent);
+        if (!position || !container) {
+          return;
+        }
+        isPanning = true;
+        startX = position.x;
+        startY = position.y;
+        startScrollLeft = container.scrollLeft;
+        startScrollTop = container.scrollTop;
+        container.classList.add("is-panning");
+        rawEvent.preventDefault?.();
+      };
+
+      const move = (event: unknown) => {
+        if (!isPanning || !container) {
+          return;
+        }
+        const opt = event as { e: Event };
+        const rawEvent = opt.e;
+        const position = getClientPositionFromEvent(rawEvent);
+        if (!position) {
+          return;
+        }
+        const deltaX = position.x - startX;
+        const deltaY = position.y - startY;
+        container.scrollLeft = startScrollLeft - deltaX;
+        container.scrollTop = startScrollTop - deltaY;
+        rawEvent.preventDefault?.();
+      };
+
+      const up = () => {
+        isPanning = false;
+        container?.classList.remove("is-panning");
       };
 
       canvas.on("mouse:down", down);
@@ -1042,7 +1136,7 @@ function App() {
 
   const runAutoOcrFromPendingRect = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
-    if (!canvas || isSelectionMode || isAutoOcrBusyRef.current) {
+    if (!canvas || !isOcrEnabledRef.current || isSelectionMode || isAutoOcrBusyRef.current) {
       return;
     }
 
@@ -1067,6 +1161,9 @@ function App() {
 
       const worker = await getWorker();
       const result = await worker.recognize(imageData);
+      if (!isOcrEnabledRef.current) {
+        return;
+      }
       const chunk = normalizeOcrChunk(result.data.text);
 
       if (!chunk) {
@@ -1096,7 +1193,7 @@ function App() {
       isAutoOcrBusyRef.current = false;
       setIsOcrRunning(false);
 
-      if (autoOcrRectRef.current && autoOcrTimeoutRef.current === null) {
+      if (isOcrEnabledRef.current && autoOcrRectRef.current && autoOcrTimeoutRef.current === null) {
         autoOcrTimeoutRef.current = window.setTimeout(() => {
           autoOcrTimeoutRef.current = null;
           void runAutoOcrFromPendingRect();
@@ -1108,7 +1205,7 @@ function App() {
   const scheduleAutoOcrForRect = useCallback(
     (rect: SelectionRect) => {
       const canvas = fabricCanvasRef.current;
-      if (!canvas) {
+      if (!canvas || !isOcrEnabledRef.current) {
         return;
       }
 
@@ -1150,7 +1247,7 @@ function App() {
   const runOcrForRect = useCallback(
     async (rect: SelectionRect) => {
       const canvas = fabricCanvasRef.current;
-      if (!canvas || rect.width < 6 || rect.height < 6) {
+      if (!canvas || !isOcrEnabledRef.current || rect.width < 6 || rect.height < 6) {
         return;
       }
 
@@ -1414,6 +1511,111 @@ function App() {
   }, [addPage, isCanvasReady, isOcrRunning, isSelectionMode, syncCanvasOffset]);
 
   useEffect(() => {
+    if (!isCanvasReady) {
+      return;
+    }
+
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    let isTwoFingerPanning = false;
+    let startCenterX = 0;
+    let startCenterY = 0;
+    let startScrollLeft = 0;
+    let startScrollTop = 0;
+    let drawingModeBefore = false;
+
+    const startTwoFingerPan = (event: TouchEvent) => {
+      const center = getTouchCenter(event.touches);
+      if (!center) {
+        return;
+      }
+
+      isTwoFingerPanning = true;
+      startCenterX = center.x;
+      startCenterY = center.y;
+      startScrollLeft = container.scrollLeft;
+      startScrollTop = container.scrollTop;
+      container.classList.add("is-two-finger-panning");
+
+      const canvas = fabricCanvasRef.current;
+      if (canvas) {
+        drawingModeBefore = canvas.isDrawingMode;
+        canvas.isDrawingMode = false;
+      } else {
+        drawingModeBefore = false;
+      }
+
+      event.preventDefault();
+    };
+
+    const stopTwoFingerPan = () => {
+      if (!isTwoFingerPanning) {
+        return;
+      }
+
+      isTwoFingerPanning = false;
+      container.classList.remove("is-two-finger-panning");
+
+      const canvas = fabricCanvasRef.current;
+      if (canvas && drawingModeBefore && activeToolRef.current === "pen") {
+        canvas.isDrawingMode = true;
+      }
+    };
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length === 2) {
+        startTwoFingerPan(event);
+      }
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (!isTwoFingerPanning) {
+        if (event.touches.length === 2) {
+          startTwoFingerPan(event);
+        }
+        return;
+      }
+
+      const center = getTouchCenter(event.touches);
+      if (!center) {
+        return;
+      }
+
+      const deltaX = center.x - startCenterX;
+      const deltaY = center.y - startCenterY;
+      container.scrollLeft = startScrollLeft - deltaX;
+      container.scrollTop = startScrollTop - deltaY;
+      event.preventDefault();
+    };
+
+    const onTouchEnd = (event: TouchEvent) => {
+      if (event.touches.length < 2) {
+        stopTwoFingerPan();
+      }
+    };
+
+    const onTouchCancel = () => {
+      stopTwoFingerPan();
+    };
+
+    container.addEventListener("touchstart", onTouchStart, { passive: false, capture: true });
+    container.addEventListener("touchmove", onTouchMove, { passive: false, capture: true });
+    container.addEventListener("touchend", onTouchEnd, { passive: false, capture: true });
+    container.addEventListener("touchcancel", onTouchCancel, { passive: false, capture: true });
+
+    return () => {
+      stopTwoFingerPan();
+      container.removeEventListener("touchstart", onTouchStart, true);
+      container.removeEventListener("touchmove", onTouchMove, true);
+      container.removeEventListener("touchend", onTouchEnd, true);
+      container.removeEventListener("touchcancel", onTouchCancel, true);
+    };
+  }, [isCanvasReady]);
+
+  useEffect(() => {
     return () => {
       const worker = workerRef.current;
       if (worker) {
@@ -1458,13 +1660,28 @@ function App() {
     localStorage.setItem(BACKGROUND_STORAGE_KEY, backgroundMode);
   }, [backgroundMode]);
 
+  useEffect(() => {
+    isOcrEnabledRef.current = isOcrEnabled;
+    if (!isOcrEnabled) {
+      setIsSelectionMode(false);
+      clearSelectionOverlay();
+      clearAutoOcrSchedule();
+      autoOcrRectRef.current = null;
+      isAutoOcrBusyRef.current = false;
+      setIsOcrRunning(false);
+      setOcrStatus("OCR spento");
+      return;
+    }
+    setOcrStatus("OCR attivo");
+  }, [clearAutoOcrSchedule, clearSelectionOverlay, isOcrEnabled]);
+
   const penSizePopoverStyle = getSizePopoverStyle(penToolRef.current);
   const eraserSizePopoverStyle = getSizePopoverStyle(eraserToolRef.current);
 
   return (
     <main className="whiteboard-app">
       <div
-        className="board-scroll-area"
+        className={tool === "pan" ? "board-scroll-area pan-mode" : "board-scroll-area"}
         ref={containerRef}
         onPointerMove={handleBoardPointerMove}
         onPointerLeave={hideEraserPreview}
@@ -1597,13 +1814,31 @@ function App() {
           <span className="sr-only">Linea</span>
         </button>
         <button
-          className={isSelectionMode ? "active warning ocr-button" : "warning ocr-button"}
-          onClick={() => setIsSelectionMode((value) => !value)}
+          className={`icon-button ${tool === "pan" ? "active" : ""}`}
+          onClick={() => setTool("pan")}
+          title="Mano (scorri)"
+          aria-label="Mano (scorri)"
           type="button"
-          disabled={isOcrRunning}
         >
-          Selezione OCR
+          <i className="fa-solid fa-hand" />
+          <span className="sr-only">Mano</span>
         </button>
+        <div className="ocr-switch-control" aria-label="Interruttore OCR">
+          <span className="ocr-switch-label">OCR</span>
+          <label className="ocr-switch">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={isOcrEnabled}
+              onChange={(event) => setIsOcrEnabled(event.target.checked)}
+              disabled={isOcrRunning}
+              aria-label="Attiva o disattiva OCR"
+            />
+            <span className="ocr-switch-track">
+              <span className="ocr-switch-thumb" />
+            </span>
+          </label>
+        </div>
 
         <span>Colore</span>
         <div className="color-palette" role="group" aria-label="Colori principali">
