@@ -457,6 +457,7 @@ function App() {
   const [isArchiveLoading, setIsArchiveLoading] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState("");
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
+  const [isSharingFiles, setIsSharingFiles] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
     () => initialDocumentRef.current.journalEntries
   );
@@ -1413,21 +1414,50 @@ function App() {
     }
   }, [buildArchivePreviewImages, buildCurrentDocumentSnapshot, applyPersistedDocument, flushPendingDocumentSaveNow, loadArchiveEntries, setActiveArchiveDocumentId]);
 
-  const exportPdf = useCallback(async () => {
+  const downloadBlob = useCallback((blob: Blob, fileName: string) => {
+    const downloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(downloadUrl);
+  }, []);
+
+  const buildJournalExportPayload = useCallback(
+    () =>
+      journalEntries.map((entry) => ({
+        date: entry.date,
+        accountName: entry.accountName,
+        description: entry.description,
+        debit: entry.debit,
+        credit: entry.credit
+      })),
+    [journalEntries]
+  );
+
+  const buildJournalWorkbookBlob = useCallback(
+    async (datePart: string) =>
+      exportJournalWorkbook(buildJournalExportPayload(), `giornale_data_${datePart}`),
+    [buildJournalExportPayload]
+  );
+
+  const buildPdfBlob = useCallback(async (): Promise<Blob | null> => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) {
-      return;
+      return null;
     }
     const sourceCanvas = (canvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl;
     if (!sourceCanvas) {
-      return;
+      return null;
     }
 
     persistCurrentDocument();
 
     const pagesSnapshot = pagesRef.current;
     if (pagesSnapshot.length === 0) {
-      return;
+      return null;
     }
 
     const { jsPDF } = await lazyImportJsPDF();
@@ -1483,12 +1513,20 @@ function App() {
       }
       doc.addImage(image, "JPEG", 15, y, drawWidth, drawHeight, undefined, "MEDIUM");
     }
+    return doc.output("blob");
+  }, [backgroundMode, persistCurrentDocument]);
+
+  const exportPdf = useCallback(async () => {
+    const pdfBlob = await buildPdfBlob();
+    if (!pdfBlob) {
+      return;
+    }
 
     const defaultName = buildDocumentBaseName(Date.now());
     const promptedName = window.prompt("Nome PDF", defaultName);
     const fileName = (promptedName ?? defaultName).trim() || defaultName;
-    doc.save(`${fileName}.pdf`);
-  }, [backgroundMode, persistCurrentDocument]);
+    downloadBlob(pdfBlob, `${fileName}.pdf`);
+  }, [buildPdfBlob, downloadBlob]);
 
   const undo = useCallback(async () => {
     const undoStack = undoStackRef.current;
@@ -1569,24 +1607,9 @@ function App() {
   const extractJournalData = useCallback(async () => {
     setIsJournalExtracting(true);
     try {
-      const payload = journalEntries.map((entry) => ({
-        date: entry.date,
-        accountName: entry.accountName,
-        description: entry.description,
-        debit: entry.debit,
-        credit: entry.credit
-      }));
       const datePart = new Date().toISOString().slice(0, 10);
-      const blob = await exportJournalWorkbook(payload, `giornale_data_${datePart}`);
-
-      const downloadUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = downloadUrl;
-      link.download = `giornale_data_${datePart}.xlsx`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(downloadUrl);
+      const blob = await buildJournalWorkbookBlob(datePart);
+      downloadBlob(blob, `giornale_data_${datePart}.xlsx`);
     } catch {
       window.alert(
         "Estrazione non riuscita. Verifica che API sia avviata e che il template sia configurato in JOURNAL_TEMPLATE_PATH."
@@ -1594,7 +1617,59 @@ function App() {
     } finally {
       setIsJournalExtracting(false);
     }
-  }, [journalEntries]);
+  }, [buildJournalWorkbookBlob, downloadBlob]);
+
+  const shareBoardAndJournal = useCallback(async () => {
+    setIsSharingFiles(true);
+    try {
+      const now = Date.now();
+      const datePart = new Date(now).toISOString().slice(0, 10);
+      const pdfBaseName = buildDocumentBaseName(now);
+      const [pdfBlob, xlsxBlob] = await Promise.all([
+        buildPdfBlob(),
+        buildJournalWorkbookBlob(datePart)
+      ]);
+
+      if (!pdfBlob) {
+        window.alert("Condivisione non disponibile: impossibile generare il PDF.");
+        return;
+      }
+
+      const pdfFile = new File([pdfBlob], `${pdfBaseName}.pdf`, { type: "application/pdf" });
+      const xlsxFile = new File([xlsxBlob], `giornale_data_${datePart}.xlsx`, {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      });
+
+      const nav = navigator as Navigator & {
+        canShare?: (data: ShareData) => boolean;
+      };
+      const files = [pdfFile, xlsxFile];
+      const canShareFiles =
+        typeof nav.canShare === "function" ? nav.canShare({ files }) : true;
+
+      if (typeof nav.share === "function" && canShareFiles) {
+        await nav.share({
+          title: "MYAccounting",
+          text: "Lavagna PDF + giornale_data XLSX",
+          files
+        });
+        return;
+      }
+
+      downloadBlob(pdfBlob, pdfFile.name);
+      downloadBlob(xlsxBlob, xlsxFile.name);
+      window.alert(
+        "Condivisione nativa non disponibile su questo dispositivo. Ho scaricato i due file separati."
+      );
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      window.alert("Condivisione non riuscita. Verifica API e riprova.");
+    } finally {
+      setIsSharingFiles(false);
+    }
+  }, [buildJournalWorkbookBlob, buildPdfBlob, downloadBlob]);
 
   const appendDisplay = useCallback((value: string) => {
     setDisplay((previous) => `${previous}${value}`);
@@ -2567,6 +2642,17 @@ function App() {
         >
           <i className="fa-solid fa-file-pdf" />
           <span className="sr-only">Salva PDF</span>
+        </button>
+        <button
+          className="icon-button"
+          title="Condividi PDF + XLSX"
+          aria-label="Condividi PDF + XLSX"
+          type="button"
+          onClick={() => void shareBoardAndJournal()}
+          disabled={isSharingFiles || isJournalExtracting}
+        >
+          <i className="fa-solid fa-share-nodes" />
+          <span className="sr-only">Condividi PDF + XLSX</span>
         </button>
         <button
           className="icon-button"
