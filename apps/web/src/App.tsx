@@ -1140,6 +1140,31 @@ function App() {
     setArchiveMessage("");
   }, [applyPersistedDocument, flushPendingDocumentSaveNow]);
 
+  const archiveAndCreateNew = useCallback(async () => {
+    const currentDocument = buildCurrentDocumentSnapshot();
+    try {
+      // Archive current document
+      await archiveBoardDocument(currentDocument);
+      
+      // Create new empty document
+      const emptyDocument: PersistedDocument = {
+        pages: [createPage(0)],
+        canvasData: null
+      };
+
+      await applyPersistedDocument(emptyDocument);
+      pendingDocumentSaveRef.current = emptyDocument;
+      flushPendingDocumentSaveNow();
+      
+      // Refresh archive entries and close panel
+      await loadArchiveEntries();
+      setIsArchiveOpen(false);
+      setArchiveMessage("Documento archiviato e nuovo documento creato");
+    } catch {
+      setArchiveMessage("Archiviazione fallita");
+    }
+  }, [buildCurrentDocumentSnapshot, applyPersistedDocument, flushPendingDocumentSaveNow, loadArchiveEntries]);
+
   const exportPdf = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) {
@@ -2338,6 +2363,16 @@ function App() {
               >
                 <i className="fa-solid fa-rotate" />
                 <span className="sr-only">Aggiorna</span>
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                title="Nuovo"
+                aria-label="Nuovo"
+                onClick={() => void archiveAndCreateNew()}
+              >
+                <i className="fa-solid fa-file-circle-plus" />
+                <span className="sr-only">Nuovo</span>
               </button>
               <button
                 className="icon-button"
