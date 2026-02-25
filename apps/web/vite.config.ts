@@ -47,6 +47,23 @@ export default defineConfig({
       }
     })
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+          canvas: ['fabric'],
+          ocr: ['tesseract.js'],
+          pdf: ['jspdf'],
+          math: ['mathjs']
+        }
+      }
+    },
+    chunkSizeWarningLimit: 1000
+  },
+  optimizeDeps: {
+    exclude: ['fabric', 'tesseract.js', 'jspdf', 'mathjs']
+  },
   server: {
     port: 5173,
     strictPort: true

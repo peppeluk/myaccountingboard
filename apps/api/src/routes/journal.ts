@@ -290,7 +290,7 @@ export function registerJournalRoutes(app: FastifyInstance, config: AppConfig): 
         "Content-Type",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       );
-      reply.header("Content-Disposition", `attachment; filename=\"${safeBaseName}.xlsx\"`);
+      reply.header("Content-Disposition", `attachment; filename="${safeBaseName}.xlsx"`);
       return reply.send(outputBuffer);
     } catch (error) {
       request.log.error(

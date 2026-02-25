@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Canvas as FabricCanvas, Line as FabricLine } from "fabric";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
+import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine } from "./lib/lazyImports";
 import {
   archiveBoardDocument,
   deleteArchivedBoardDocument,
@@ -1065,7 +1065,7 @@ function App() {
       return workerRef.current;
     }
     if (!workerInitPromiseRef.current) {
-      workerInitPromiseRef.current = import("tesseract.js").then((tesseract) =>
+      workerInitPromiseRef.current = lazyImportTesseract().then((tesseract) =>
         tesseract.createWorker("eng").then(async (worker) => {
           const configurableWorker = worker as OcrWorker & {
             setParameters?: (params: Record<string, string>) => Promise<unknown>;
@@ -1123,6 +1123,23 @@ function App() {
     containerRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, [loadCanvasData, persistDocument, resetHistory]);
 
+  const createNewDocument = useCallback(async () => {
+    if (!window.confirm("Creare un nuovo documento vuoto?")) {
+      return;
+    }
+
+    const emptyDocument: PersistedDocument = {
+      pages: [createPage(0)],
+      canvasData: null
+    };
+
+    await applyPersistedDocument(emptyDocument);
+    pendingDocumentSaveRef.current = emptyDocument;
+    flushPendingDocumentSaveNow();
+    setIsArchiveOpen(false);
+    setArchiveMessage("");
+  }, [applyPersistedDocument, flushPendingDocumentSaveNow]);
+
   const exportPdf = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) {
@@ -1140,7 +1157,7 @@ function App() {
       return;
     }
 
-    const { jsPDF } = await import("jspdf");
+    const { jsPDF } = await lazyImportJsPDF();
     const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
     const canvasWidth = Math.max(1, canvas.getWidth());
     const canvasHeight = Math.max(1, canvas.getHeight());
@@ -1317,7 +1334,7 @@ function App() {
       }
 
       try {
-        const { evaluate } = await import("mathjs");
+        const { evaluate } = await lazyImportMathJS();
         const result = evaluate(expression);
         const resolved = `${formatExpressionForDisplay(expression)}=${result}`;
         setDisplay(resolved);
@@ -1622,7 +1639,7 @@ function App() {
     let onResize: (() => void) | null = null;
     let createdCanvas: FabricCanvas | null = null;
 
-    void import("fabric").then((fabricModule) => {
+    void lazyImportFabric().then((fabricModule) => {
       if (unmounted) {
         return;
       }
@@ -1721,7 +1738,6 @@ function App() {
     return () => {
       window.removeEventListener("pagehide", handleAppExit);
       window.removeEventListener("beforeunload", handleAppExit);
-      handleAppExit();
     };
   }, [saveAndArchiveOnExit]);
 
@@ -2216,6 +2232,16 @@ function App() {
         >
           <i className="fa-solid fa-box-archive" />
           <span className="sr-only">Archivio</span>
+        </button>
+        <button
+          className="icon-button"
+          title="Nuovo documento"
+          aria-label="Nuovo documento"
+          type="button"
+          onClick={() => void createNewDocument()}
+        >
+          <i className="fa-solid fa-file" />
+          <span className="sr-only">Nuovo documento</span>
         </button>
         <button
           className="icon-button"
