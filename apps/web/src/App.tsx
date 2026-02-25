@@ -52,14 +52,13 @@ const TOOL_LONG_PRESS_MS = 420;
 const AUTO_OCR_DEBOUNCE_MS = 550;
 const AUTO_OCR_PADDING = 24;
 const PEN_DECIMATE = 0.6;
-const ERASER_DECIMATE = 1.1;
 const SNAPSHOT_NUMBER_PRECISION = 2;
 const PDF_EXPORT_MULTIPLIER = 1.25;
 const PDF_EXPORT_JPEG_QUALITY = 0.72;
 const GRID_BACKGROUND_COLOR = "rgba(148, 163, 184, 0.35)";
 const GRID_BACKGROUND_SIZE = 28;
 const GRID_BACKGROUND_LINE_WIDTH = 1;
-const DOCUMENT_SAVE_DEBOUNCE_MS = 750;
+const DOCUMENT_SAVE_DEBOUNCE_MS = 500;
 const SIZE_POPOVER_HALF_WIDTH = 72;
 const SIZE_POPOVER_MARGIN = 8;
 const SIZE_LEVELS: Array<{ key: SizeLevel; label: string }> = [
@@ -902,30 +901,73 @@ function App() {
     }
 
     if (tool === "eraser") {
-      if (!fabricModule) {
-        return;
-      }
-
-      class EraserBrush extends fabricModule.PencilBrush {
-        _setBrushStyles(ctx: CanvasRenderingContext2D): void {
-          super._setBrushStyles(ctx);
-          ctx.globalCompositeOperation = "destination-out";
-        }
-      }
-
-      const eraserBrush = new EraserBrush(canvas);
-      canvas.freeDrawingBrush = eraserBrush as FabricCanvas["freeDrawingBrush"];
-      const brush = canvas.freeDrawingBrush as (FabricCanvas["freeDrawingBrush"] & {
-        decimate?: number;
-      }) | undefined;
-      if (!brush) {
-        return;
-      }
-      brush.color = "#000000";
-      brush.width = eraserStrokeWidth;
-      brush.decimate = ERASER_DECIMATE;
-      canvas.isDrawingMode = true;
+      // Disable Fabric.js drawing mode - we'll handle it manually
+      canvas.isDrawingMode = false;
       canvas.selection = false;
+      
+      let isErasing = false;
+      let lastX = 0;
+      let lastY = 0;
+
+      // Add event listeners directly to canvas element
+      const canvasElement = canvas.getElement();
+      
+      const handlePointerDown = (e: PointerEvent) => {
+        isErasing = true;
+        const rect = canvasElement.getBoundingClientRect();
+        lastX = e.clientX - rect.left;
+        lastY = e.clientY - rect.top;
+      };
+
+      const handlePointerMove = (e: PointerEvent) => {
+        if (!isErasing) return;
+        
+        const rect = canvasElement.getBoundingClientRect();
+        const currentX = e.clientX - rect.left;
+        const currentY = e.clientY - rect.top;
+        
+        // Get the actual 2D context from DOM element
+        const ctx = canvasElement.getContext('2d');
+        if (ctx) {
+          ctx.save();
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.lineWidth = eraserStrokeWidth;
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          
+          ctx.beginPath();
+          ctx.moveTo(lastX, lastY);
+          ctx.lineTo(currentX, currentY);
+          ctx.stroke();
+          
+          ctx.restore();
+        }
+        
+        lastX = currentX;
+        lastY = currentY;
+      };
+
+      const handlePointerUp = () => {
+        isErasing = false;
+      };
+
+      const handlePointerLeave = () => {
+        isErasing = false;
+      };
+
+      // Add event listeners directly to canvas element
+      canvasElement.addEventListener('pointerdown', handlePointerDown);
+      canvasElement.addEventListener('pointermove', handlePointerMove);
+      canvasElement.addEventListener('pointerup', handlePointerUp);
+      canvasElement.addEventListener('pointerleave', handlePointerLeave);
+
+      // Store handlers for cleanup (cast to any for compatibility)
+      toolHandlersRef.current = {
+        down: handlePointerDown as any,
+        move: handlePointerMove as any,
+        up: handlePointerUp as any
+      };
+      
       return;
     }
 
