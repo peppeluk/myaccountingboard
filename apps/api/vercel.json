@@ -2,7 +2,8 @@
   "version": 2,
   "functions": {
     "api/index.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+"includedFiles": ["templates/**"]
     }
   },
   "rewrites": [
@@ -10,6 +11,5 @@
       "source": "/(.*)",
       "destination": "/api/index.ts"
     }
-  ],
-"includedFiles": ["templates/**"]
+  ]
 }
