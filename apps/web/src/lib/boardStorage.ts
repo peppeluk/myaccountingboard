@@ -3,9 +3,21 @@ export type BoardPage = {
   name: string;
 };
 
+export type BoardJournalEntry = {
+  id: string;
+  date: string;
+  accountCode: string;
+  accountName: string;
+  description: string;
+  debit: string;
+  credit: string;
+  closeLine: boolean;
+};
+
 export type BoardDocument = {
   pages: BoardPage[];
   canvasData: string | null;
+  journalEntries: BoardJournalEntry[];
 };
 
 export type ArchivedBoardDocument = {
@@ -13,6 +25,8 @@ export type ArchivedBoardDocument = {
   fileName: string;
   updatedAt: number;
   pageCount: number;
+  previewImages: string[];
+  journalPreview: BoardJournalEntry[];
 };
 
 type StoredBoardRecord = {
@@ -20,6 +34,7 @@ type StoredBoardRecord = {
   format: "mbd-json-v1";
   fileName: string;
   updatedAt: number;
+  previewImages?: string[];
   data: BoardDocument;
 };
 
@@ -53,6 +68,35 @@ function buildArchiveKey(timestamp: number): string {
   return `${ARCHIVE_KEY_PREFIX}${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function normalizePreviewImages(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function normalizeArchiveFileName(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error("Nome file non valido");
+  }
+  return /\.mbd$/i.test(trimmed) ? trimmed : `${trimmed}.mbd`;
+}
+
+function buildJournalPreview(entries: BoardJournalEntry[]): BoardJournalEntry[] {
+  return entries
+    .filter(
+      (entry) =>
+        entry.date ||
+        entry.accountCode ||
+        entry.accountName ||
+        entry.description ||
+        entry.debit ||
+        entry.credit
+    )
+    .slice(0, 10);
+}
+
 function normalizeBoardDocument(input: unknown): BoardDocument | null {
   if (!input || typeof input !== "object") {
     return null;
@@ -73,9 +117,31 @@ function normalizeBoardDocument(input: unknown): BoardDocument | null {
         .filter((item): item is BoardPage => item !== null)
     : [];
 
+  const journalEntries = Array.isArray(raw.journalEntries)
+    ? raw.journalEntries
+        .map((item, index) => {
+          if (!item || typeof item !== "object") {
+            return null;
+          }
+          const entry = item as Partial<BoardJournalEntry>;
+          return {
+            id: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : `journal-${index}`,
+            date: typeof entry.date === "string" ? entry.date : "",
+            accountCode: typeof entry.accountCode === "string" ? entry.accountCode : "",
+            accountName: typeof entry.accountName === "string" ? entry.accountName : "",
+            description: typeof entry.description === "string" ? entry.description : "",
+            debit: typeof entry.debit === "string" ? entry.debit : "",
+            credit: typeof entry.credit === "string" ? entry.credit : "",
+            closeLine: entry.closeLine === true
+          } satisfies BoardJournalEntry;
+        })
+        .filter((item): item is BoardJournalEntry => item !== null)
+    : [];
+
   return {
     pages,
-    canvasData: typeof raw.canvasData === "string" ? raw.canvasData : null
+    canvasData: typeof raw.canvasData === "string" ? raw.canvasData : null,
+    journalEntries
   };
 }
 
@@ -170,19 +236,24 @@ export async function saveLastBoardDocument(document: BoardDocument): Promise<vo
   });
 }
 
-export async function archiveBoardDocument(document: BoardDocument): Promise<string | null> {
+export async function archiveBoardDocument(
+  document: BoardDocument,
+  archiveId?: string | null,
+  previewImages?: string[]
+): Promise<string | null> {
   const normalized = normalizeBoardDocument(document);
   if (!normalized || normalized.pages.length === 0) {
     return null;
   }
 
   const now = Date.now();
-  const key = buildArchiveKey(now);
+  const key = archiveId && isArchiveKey(archiveId) ? archiveId : buildArchiveKey(now);
   const record: StoredBoardRecord = {
     id: key,
     format: "mbd-json-v1",
     fileName: buildBoardFileName(now),
     updatedAt: now,
+    previewImages: normalizePreviewImages(previewImages),
     data: normalized
   };
 
@@ -230,7 +301,11 @@ export async function listArchivedBoardDocuments(): Promise<ArchivedBoardDocumen
           id: row.id,
           fileName: row.fileName,
           updatedAt: row.updatedAt,
-          pageCount: row.data.pages.length
+          pageCount: row.data.pages.length,
+          previewImages: normalizePreviewImages(row.previewImages),
+          journalPreview: buildJournalPreview(
+            Array.isArray(row.data.journalEntries) ? row.data.journalEntries : []
+          )
         }))
         .sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -290,6 +365,48 @@ export async function deleteArchivedBoardDocument(id: string): Promise<void> {
     };
     transaction.onerror = () => {
       reject(transaction.error ?? new Error("Cancellazione documento archivio fallita"));
+    };
+    transaction.onabort = () => {
+      reject(transaction.error ?? new Error("Transazione IndexedDB annullata"));
+    };
+  });
+}
+
+export async function renameArchivedBoardDocument(id: string, nextFileName: string): Promise<void> {
+  if (!isArchiveKey(id)) {
+    return;
+  }
+
+  const normalizedFileName = normalizeArchiveFileName(nextFileName);
+  const database = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(id);
+
+    request.onsuccess = () => {
+      const row = request.result as StoredBoardRecord | undefined;
+      if (!row || typeof row !== "object") {
+        return;
+      }
+
+      const updatedRecord: StoredBoardRecord = {
+        ...row,
+        fileName: normalizedFileName,
+        updatedAt: Date.now()
+      };
+      store.put(updatedRecord, id);
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Lettura documento archivio fallita"));
+    };
+
+    transaction.oncomplete = () => {
+      resolve();
+    };
+    transaction.onerror = () => {
+      reject(transaction.error ?? new Error("Rinomina documento archivio fallita"));
     };
     transaction.onabort = () => {
       reject(transaction.error ?? new Error("Transazione IndexedDB annullata"));

@@ -424,6 +424,13 @@ button:disabled {
   align-items: center;
 }
 
+.journal-panel-actions-bottom {
+  width: 100%;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
 .journal-table-wrap {
   flex: 1;
   min-height: 0;
@@ -463,20 +470,65 @@ button:disabled {
   padding: 7px 8px;
 }
 
-.journal-row-index {
-  width: 54px;
-  text-align: center;
-  font-weight: 600;
-  color: #1e293b;
+.journal-date-column,
+.journal-date-cell {
+  width: 132px;
+  min-width: 132px;
+}
+
+.journal-account-code-column,
+.journal-account-code-cell {
+  width: 88px;
+  min-width: 88px;
+}
+
+.journal-account-code-cell {
+  color: #1d4ed8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+    monospace;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.journal-account-code-placeholder {
+  color: #94a3b8;
+  font-weight: 500;
 }
 
 .journal-account-cell {
   min-width: 250px;
 }
 
+.journal-amount-column,
+.journal-amount-cell {
+  width: 140px;
+  min-width: 140px;
+}
+
+.journal-amount-cell input {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .journal-remove-cell {
-  width: 54px;
+  width: 100px;
+  min-width: 100px;
   text-align: center;
+  white-space: nowrap;
+}
+
+.journal-remove-cell .icon-button {
+  width: 34px;
+  height: 34px;
+}
+
+.journal-remove-cell .icon-button + .icon-button {
+  margin-left: 6px;
+}
+
+.journal-close-line-cell {
+  border-bottom: 2px solid #111827 !important;
 }
 
 .account-picker {
@@ -541,12 +593,16 @@ button:disabled {
   color: #475569;
 }
 
+.journal-panel-footer p {
+  margin: 0;
+}
+
 .archive-panel {
   position: fixed;
+  left: 12px;
   right: 12px;
   bottom: 102px;
-  width: min(500px, calc(100vw - 24px));
-  max-height: calc(100vh - 130px);
+  height: min(78vh, 820px);
   display: flex;
   flex-direction: column;
   border: 1px solid #d5dce7;
@@ -580,23 +636,67 @@ button:disabled {
 .archive-panel-body {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 10px 12px;
+}
+
+.archive-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d5dce7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 6px 8px;
+  margin-bottom: 10px;
+}
+
+.archive-search i {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.archive-search input {
+  width: 100%;
+  border: 0;
+  outline: none;
+  font-size: 13px;
+  background: transparent;
+  color: #0f172a;
+}
+
+.archive-layout {
+  height: calc(100% - 50px);
+  display: grid;
+  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  gap: 12px;
 }
 
 .archive-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 2px;
 }
 
 .archive-item {
   display: flex;
   align-items: stretch;
   gap: 8px;
+  border: 1px solid #dbe3ed;
+  border-radius: 10px;
+  padding: 6px;
+  background: #ffffff;
 }
 
-.archive-open-button {
+.archive-item.selected {
+  border-color: #8fb8f4;
+  background: #f3f8ff;
+}
+
+.archive-select-button {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -604,15 +704,158 @@ button:disabled {
   align-items: flex-start;
   gap: 3px;
   text-align: left;
+  border: 0;
+  padding: 8px;
+  background: transparent;
 }
 
-.archive-open-button strong {
+.archive-select-button strong {
   color: #0f172a;
 }
 
-.archive-open-button span {
+.archive-select-button span {
   color: #475569;
   font-size: 12px;
+}
+
+.archive-item-actions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.archive-item-actions .icon-button {
+  width: 34px;
+  height: 34px;
+}
+
+.archive-preview-pane {
+  border: 1px solid #dbe3ed;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.archive-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.archive-preview-header strong {
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-preview-header span {
+  color: #475569;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.archive-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
+  gap: 10px;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 2px;
+  margin-bottom: 10px;
+}
+
+.archive-page-thumb {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.archive-page-canvas {
+  border: 1px solid #d5dce7;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+  aspect-ratio: 3 / 4;
+}
+
+.archive-page-canvas img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.archive-page-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 10px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.archive-page-thumb figcaption {
+  font-size: 11px;
+  color: #475569;
+}
+
+.archive-journal-preview {
+  border-top: 1px solid #dbe3ed;
+  padding-top: 8px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.archive-journal-preview header {
+  margin-bottom: 6px;
+}
+
+.archive-journal-preview strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.archive-journal-table-wrap {
+  overflow: auto;
+  border: 1px solid #dbe3ed;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.archive-journal-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 620px;
+  font-size: 11px;
+}
+
+.archive-journal-table th,
+.archive-journal-table td {
+  border: 1px solid #edf2f7;
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+  color: #334155;
+}
+
+.archive-journal-table th {
+  background: #f8fafc;
+  color: #0f172a;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .archive-empty {
@@ -710,10 +953,18 @@ button:disabled {
   }
 
   .archive-panel {
+    left: 8px;
     right: 8px;
     bottom: 98px;
-    width: min(500px, calc(100vw - 16px));
-    max-height: calc(100vh - 112px);
+    height: min(82vh, calc(100vh - 112px));
+  }
+
+  .archive-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .archive-preview-pane {
+    min-height: 220px;
   }
 
   .archive-panel-footer {

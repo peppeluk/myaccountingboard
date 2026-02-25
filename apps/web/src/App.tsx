@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
@@ -9,8 +9,10 @@ import {
   listArchivedBoardDocuments,
   loadArchivedBoardDocument,
   loadLastBoardDocument,
+  renameArchivedBoardDocument,
   saveLastBoardDocument,
-  type ArchivedBoardDocument
+  type ArchivedBoardDocument,
+  type BoardDocument
 } from "./lib/boardStorage";
 
 type Tool = "pen" | "eraser" | "line" | "pan";
@@ -22,15 +24,13 @@ type Page = {
   name: string;
 };
 
-type PersistedDocument = {
-  pages: Page[];
-  canvasData: string | null;
-};
+type PersistedDocument = BoardDocument;
 
 type ToolHandlers = {
   down?: (event: unknown) => void;
   move?: (event: unknown) => void;
   up?: (event: unknown) => void;
+  leave?: (event: unknown) => void;
 };
 
 type SelectionRect = {
@@ -43,7 +43,9 @@ type SelectionRect = {
 const LEGACY_STORAGE_KEY = "myaccounting.whiteboard.pages.v1";
 const JOURNAL_STORAGE_KEY = "myaccounting.journal.entries.v1";
 const BACKGROUND_STORAGE_KEY = "myaccounting.whiteboard.background.v1";
+const ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY = "myaccounting.archive.active.v1";
 const MAX_JOURNAL_ENTRIES = 202;
+const MIN_VISIBLE_JOURNAL_ENTRIES = 10;
 const PAGE_HEIGHT = 1600;
 const PAGE_SEPARATOR_HEIGHT = 24;
 const MAX_HISTORY = 80;
@@ -55,6 +57,8 @@ const PEN_DECIMATE = 0.6;
 const SNAPSHOT_NUMBER_PRECISION = 2;
 const PDF_EXPORT_MULTIPLIER = 1.25;
 const PDF_EXPORT_JPEG_QUALITY = 0.72;
+const ARCHIVE_PREVIEW_WIDTH = 180;
+const ARCHIVE_PREVIEW_JPEG_QUALITY = 0.62;
 const GRID_BACKGROUND_COLOR = "rgba(148, 163, 184, 0.35)";
 const GRID_BACKGROUND_SIZE = 28;
 const GRID_BACKGROUND_LINE_WIDTH = 1;
@@ -97,43 +101,65 @@ function createJournalEntry(): JournalEntry {
     accountName: "",
     description: "",
     debit: "",
-    credit: ""
+    credit: "",
+    closeLine: false
   };
+}
+
+function createJournalEntries(count: number): JournalEntry[] {
+  return Array.from({ length: count }, () => createJournalEntry());
+}
+
+function normalizeJournalEntries(input: unknown): JournalEntry[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const entry = item as Partial<JournalEntry>;
+      return {
+        id: typeof entry.id === "string" ? entry.id : createJournalEntry().id,
+        date: typeof entry.date === "string" ? entry.date : "",
+        accountCode: typeof entry.accountCode === "string" ? entry.accountCode : "",
+        accountName: typeof entry.accountName === "string" ? entry.accountName : "",
+        description: typeof entry.description === "string" ? entry.description : "",
+        debit: typeof entry.debit === "string" ? entry.debit : "",
+        credit: typeof entry.credit === "string" ? entry.credit : "",
+        closeLine: entry.closeLine === true
+      } satisfies JournalEntry;
+    })
+    .filter((item): item is JournalEntry => item !== null);
+}
+
+function ensureMinimumJournalEntries(entries: JournalEntry[]): JournalEntry[] {
+  if (entries.length >= MIN_VISIBLE_JOURNAL_ENTRIES) {
+    return entries;
+  }
+  if (entries.length === 0) {
+    return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
+  }
+  return [...entries, ...createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES - entries.length)];
 }
 
 function loadInitialJournalEntries(): JournalEntry[] {
   try {
     const raw = localStorage.getItem(JOURNAL_STORAGE_KEY);
     if (!raw) {
-      return [createJournalEntry()];
+      return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
     }
 
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) {
-      return [createJournalEntry()];
+      return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
     }
 
-    const normalized = parsed
-      .map((item) => {
-        if (!item || typeof item !== "object") {
-          return null;
-        }
-        const entry = item as Partial<JournalEntry>;
-        return {
-          id: typeof entry.id === "string" ? entry.id : createJournalEntry().id,
-          date: typeof entry.date === "string" ? entry.date : "",
-          accountCode: typeof entry.accountCode === "string" ? entry.accountCode : "",
-          accountName: typeof entry.accountName === "string" ? entry.accountName : "",
-          description: typeof entry.description === "string" ? entry.description : "",
-          debit: typeof entry.debit === "string" ? entry.debit : "",
-          credit: typeof entry.credit === "string" ? entry.credit : ""
-        } satisfies JournalEntry;
-      })
-      .filter((item): item is JournalEntry => item !== null);
-
-    return normalized.length > 0 ? normalized : [createJournalEntry()];
+    return ensureMinimumJournalEntries(normalizeJournalEntries(parsed));
   } catch {
-    return [createJournalEntry()];
+    return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
   }
 }
 
@@ -143,6 +169,18 @@ function loadInitialBackgroundMode(): BackgroundMode {
     return raw === "grid" ? "grid" : "plain";
   } catch {
     return "plain";
+  }
+}
+
+function loadActiveArchiveDocumentId(): string | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY);
+    if (!raw || !raw.startsWith("archive:")) {
+      return null;
+    }
+    return raw;
+  } catch {
+    return null;
   }
 }
 
@@ -266,7 +304,8 @@ function loadLegacyDocumentFromLocalStorage(): PersistedDocument | null {
       return legacyPages.length > 0
         ? {
             pages: legacyPages,
-            canvasData
+            canvasData,
+            journalEntries: loadInitialJournalEntries()
           }
         : null;
     }
@@ -295,9 +334,14 @@ function loadLegacyDocumentFromLocalStorage(): PersistedDocument | null {
       return null;
     }
 
+    const normalizedJournalEntries = ensureMinimumJournalEntries(
+      normalizeJournalEntries((persisted as { journalEntries?: unknown }).journalEntries)
+    );
+
     return {
       pages: normalizedPages,
-      canvasData: typeof persisted.canvasData === "string" ? persisted.canvasData : null
+      canvasData: typeof persisted.canvasData === "string" ? persisted.canvasData : null,
+      journalEntries: normalizedJournalEntries
     };
   } catch {
     return null;
@@ -305,7 +349,11 @@ function loadLegacyDocumentFromLocalStorage(): PersistedDocument | null {
 }
 
 function loadInitialDocument(): PersistedDocument {
-  return { pages: [createPage(0)], canvasData: null };
+  return {
+    pages: [createPage(0)],
+    canvasData: null,
+    journalEntries: loadInitialJournalEntries()
+  };
 }
 
 function normalizeExpression(input: string): string {
@@ -404,10 +452,14 @@ function App() {
   const [isJournalOpen, setIsJournalOpen] = useState(false);
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
   const [archiveEntries, setArchiveEntries] = useState<ArchivedBoardDocument[]>([]);
+  const [selectedArchiveEntryId, setSelectedArchiveEntryId] = useState<string | null>(null);
+  const [archiveSearch, setArchiveSearch] = useState("");
   const [isArchiveLoading, setIsArchiveLoading] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState("");
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
-  const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(() => loadInitialJournalEntries());
+  const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
+    () => initialDocumentRef.current.journalEntries
+  );
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
   const [display, setDisplay] = useState("");
   const [isCanvasReady, setIsCanvasReady] = useState(false);
@@ -433,11 +485,13 @@ function App() {
 
   const pagesRef = useRef<Page[]>(pages);
   const canvasDataRef = useRef<string | null>(initialDocumentRef.current.canvasData);
+  const journalEntriesRef = useRef<JournalEntry[]>(initialDocumentRef.current.journalEntries);
   const currentPageIndexRef = useRef(currentPageIndex);
   const pendingDocumentSaveRef = useRef<PersistedDocument | null>(null);
   const documentSaveTimeoutRef = useRef<number | null>(null);
   const hasHydratedFromIndexedDbRef = useRef(false);
   const hasArchivedOnExitRef = useRef(false);
+  const activeArchiveDocumentIdRef = useRef<string | null>(loadActiveArchiveDocumentId());
   const undoStackRef = useRef<string[]>([]);
   const redoStackRef = useRef<string[]>([]);
   const isRestoringRef = useRef(false);
@@ -457,12 +511,41 @@ function App() {
   const penStrokeWidth = PEN_WIDTH_BY_LEVEL[penSizeLevel];
   const eraserStrokeWidth = ERASER_WIDTH_BY_LEVEL[eraserSizeLevel];
 
+  const filteredArchiveEntries = useMemo(() => {
+    const query = archiveSearch.trim().toLocaleLowerCase("it-IT");
+    if (!query) {
+      return archiveEntries;
+    }
+    return archiveEntries.filter((entry) => entry.fileName.toLocaleLowerCase("it-IT").includes(query));
+  }, [archiveEntries, archiveSearch]);
+
+  const selectedArchiveEntry = useMemo(
+    () =>
+      filteredArchiveEntries.find((entry) => entry.id === selectedArchiveEntryId) ??
+      filteredArchiveEntries[0] ??
+      null,
+    [filteredArchiveEntries, selectedArchiveEntryId]
+  );
+
   const syncCanvasOffset = useCallback(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) {
       return;
     }
     canvas.calcOffset();
+  }, []);
+
+  const setActiveArchiveDocumentId = useCallback((archiveId: string | null) => {
+    activeArchiveDocumentIdRef.current = archiveId;
+    try {
+      if (archiveId) {
+        localStorage.setItem(ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY, archiveId);
+      } else {
+        localStorage.removeItem(ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage sync errors.
+    }
   }, []);
 
   const flushDocumentSave = useCallback(() => {
@@ -527,7 +610,8 @@ function App() {
     setPages(nextPages);
     scheduleDocumentSave({
       pages: nextPages,
-      canvasData: nextCanvasData
+      canvasData: nextCanvasData,
+      journalEntries: journalEntriesRef.current
     } satisfies PersistedDocument);
   }, [scheduleDocumentSave]);
 
@@ -696,11 +780,16 @@ function App() {
   const applyPersistedDocument = useCallback(
     async (document: PersistedDocument) => {
       const normalizedPages = document.pages.length > 0 ? document.pages : [createPage(0)];
+      const normalizedJournalEntries = ensureMinimumJournalEntries(
+        normalizeJournalEntries(document.journalEntries)
+      );
       pagesRef.current = normalizedPages;
       canvasDataRef.current = document.canvasData;
+      journalEntriesRef.current = normalizedJournalEntries;
       currentPageIndexRef.current = 0;
       setCurrentPageIndex(0);
       setPages(normalizedPages);
+      setJournalEntries(normalizedJournalEntries);
 
       if (!fabricCanvasRef.current) {
         return;
@@ -718,21 +807,101 @@ function App() {
     const snapshot = snapshotCanvas();
     return {
       pages: normalizedPages,
-      canvasData: snapshot ?? canvasDataRef.current
+      canvasData: snapshot ?? canvasDataRef.current,
+      journalEntries: journalEntriesRef.current
     };
   }, [snapshotCanvas]);
+
+  const buildArchivePreviewImages = useCallback((): string[] => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) {
+      return [];
+    }
+    const sourceCanvas = (canvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl;
+    if (!sourceCanvas) {
+      return [];
+    }
+
+    try {
+      const canvasWidth = Math.max(1, canvas.getWidth());
+      const canvasHeight = Math.max(1, canvas.getHeight());
+      const previewHeight = Math.max(
+        1,
+        Math.round((PAGE_HEIGHT / canvasWidth) * ARCHIVE_PREVIEW_WIDTH)
+      );
+      const sourceScaleX = sourceCanvas.width / canvasWidth;
+      const sourceScaleY = sourceCanvas.height / canvasHeight;
+      const previewImages: string[] = [];
+
+      for (let index = 0; index < pagesRef.current.length; index += 1) {
+        const previewCanvas = document.createElement("canvas");
+        previewCanvas.width = ARCHIVE_PREVIEW_WIDTH;
+        previewCanvas.height = previewHeight;
+        const context = previewCanvas.getContext("2d");
+        if (!context) {
+          continue;
+        }
+
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+
+        if (backgroundMode === "grid") {
+          drawGridBackground(
+            context,
+            previewCanvas.width,
+            previewCanvas.height,
+            previewCanvas.width / canvasWidth
+          );
+        }
+
+        const sx = 0;
+        const sy = Math.max(0, Math.round(getPageTop(index) * sourceScaleY));
+        const sw = Math.max(1, Math.round(canvasWidth * sourceScaleX));
+        const sh = Math.max(1, Math.round(PAGE_HEIGHT * sourceScaleY));
+
+        context.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, previewCanvas.width, previewCanvas.height);
+        previewImages.push(previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY));
+      }
+
+      return previewImages;
+    } catch {
+      return [];
+    }
+  }, [backgroundMode]);
 
   const loadArchiveEntries = useCallback(async () => {
     setIsArchiveLoading(true);
     try {
       const items = await listArchivedBoardDocuments();
       setArchiveEntries(items);
+      setSelectedArchiveEntryId((current) => {
+        if (items.length === 0) {
+          return null;
+        }
+        if (current && items.some((entry) => entry.id === current)) {
+          return current;
+        }
+        return items[0].id;
+      });
     } catch {
       setArchiveMessage("Archivio non disponibile");
     } finally {
       setIsArchiveLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (filteredArchiveEntries.length === 0) {
+      setSelectedArchiveEntryId(null);
+      return;
+    }
+    if (
+      selectedArchiveEntryId === null ||
+      !filteredArchiveEntries.some((entry) => entry.id === selectedArchiveEntryId)
+    ) {
+      setSelectedArchiveEntryId(filteredArchiveEntries[0].id);
+    }
+  }, [filteredArchiveEntries, selectedArchiveEntryId]);
 
   const openArchiveDocument = useCallback(
     async (archiveId: string) => {
@@ -744,22 +913,49 @@ function App() {
           return;
         }
         await applyPersistedDocument(archivedDocument);
+        setActiveArchiveDocumentId(archiveId);
         void saveLastBoardDocument(archivedDocument).catch(() => undefined);
         setIsArchiveOpen(false);
       } catch {
         setArchiveMessage("Apertura archivio fallita");
       }
     },
-    [applyPersistedDocument]
+    [applyPersistedDocument, setActiveArchiveDocumentId]
   );
 
   const removeArchiveDocument = useCallback(
     async (archiveId: string) => {
       try {
         await deleteArchivedBoardDocument(archiveId);
+        if (activeArchiveDocumentIdRef.current === archiveId) {
+          setActiveArchiveDocumentId(null);
+        }
         await loadArchiveEntries();
       } catch {
         setArchiveMessage("Cancellazione archivio fallita");
+      }
+    },
+    [loadArchiveEntries, setActiveArchiveDocumentId]
+  );
+
+  const renameArchiveDocument = useCallback(
+    async (archiveId: string, currentFileName: string) => {
+      const defaultName = currentFileName.replace(/\.mbd$/i, "");
+      const nextFileName = window.prompt("Nuovo nome file", defaultName);
+      if (nextFileName === null) {
+        return;
+      }
+      if (!nextFileName.trim()) {
+        setArchiveMessage("Nome file non valido");
+        return;
+      }
+
+      try {
+        await renameArchivedBoardDocument(archiveId, nextFileName);
+        await loadArchiveEntries();
+        setArchiveMessage("Documento rinominato");
+      } catch {
+        setArchiveMessage("Rinomina archivio fallita");
       }
     },
     [loadArchiveEntries]
@@ -768,11 +964,17 @@ function App() {
   const archiveCurrentDocument = useCallback(
     async (silent: boolean) => {
       const currentDocument = buildCurrentDocumentSnapshot();
+      const previewImages = buildArchivePreviewImages();
       try {
-        const archivedKey = await archiveBoardDocument(currentDocument);
+        const archivedKey = await archiveBoardDocument(
+          currentDocument,
+          activeArchiveDocumentIdRef.current,
+          previewImages
+        );
         if (!archivedKey || silent) {
           return;
         }
+        setActiveArchiveDocumentId(archivedKey);
         await loadArchiveEntries();
         setArchiveMessage("Documento archiviato");
       } catch {
@@ -781,11 +983,12 @@ function App() {
         }
       }
     },
-    [buildCurrentDocumentSnapshot, loadArchiveEntries]
+    [buildArchivePreviewImages, buildCurrentDocumentSnapshot, loadArchiveEntries, setActiveArchiveDocumentId]
   );
 
   const saveAndArchiveOnExit = useCallback(() => {
     const currentDocument = buildCurrentDocumentSnapshot();
+    const previewImages = buildArchivePreviewImages();
     pendingDocumentSaveRef.current = currentDocument;
     flushPendingDocumentSaveNow();
 
@@ -793,8 +996,14 @@ function App() {
       return;
     }
     hasArchivedOnExitRef.current = true;
-    void archiveBoardDocument(currentDocument).catch(() => undefined);
-  }, [buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow]);
+    void archiveBoardDocument(currentDocument, activeArchiveDocumentIdRef.current, previewImages)
+      .then((archivedKey) => {
+        if (archivedKey) {
+          setActiveArchiveDocumentId(archivedKey);
+        }
+      })
+      .catch(() => undefined);
+  }, [buildArchivePreviewImages, buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
 
   const pushHistoryState = useCallback(() => {
     if (isRestoringRef.current) {
@@ -863,6 +1072,26 @@ function App() {
     }
 
     const handlers = toolHandlersRef.current;
+    const lowerCanvas = canvas.getElement();
+    const upperCanvas = (canvas as unknown as { upperCanvasEl?: HTMLCanvasElement }).upperCanvasEl;
+
+    if (handlers.down) {
+      lowerCanvas?.removeEventListener("pointerdown", handlers.down as EventListener);
+      upperCanvas?.removeEventListener("pointerdown", handlers.down as EventListener);
+    }
+    if (handlers.move) {
+      lowerCanvas?.removeEventListener("pointermove", handlers.move as EventListener);
+      upperCanvas?.removeEventListener("pointermove", handlers.move as EventListener);
+    }
+    if (handlers.up) {
+      lowerCanvas?.removeEventListener("pointerup", handlers.up as EventListener);
+      upperCanvas?.removeEventListener("pointerup", handlers.up as EventListener);
+    }
+    if (handlers.leave) {
+      lowerCanvas?.removeEventListener("pointerleave", handlers.leave as EventListener);
+      upperCanvas?.removeEventListener("pointerleave", handlers.leave as EventListener);
+    }
+
     if (handlers.down) {
       canvas.off("mouse:down", handlers.down);
     }
@@ -901,73 +1130,38 @@ function App() {
     }
 
     if (tool === "eraser") {
-      // Disable Fabric.js drawing mode - we'll handle it manually
-      canvas.isDrawingMode = false;
-      canvas.selection = false;
-      
-      let isErasing = false;
-      let lastX = 0;
-      let lastY = 0;
+      if (!fabricModule) {
+        return;
+      }
 
-      // Add event listeners directly to canvas element
-      const canvasElement = canvas.getElement();
-      
-      const handlePointerDown = (e: PointerEvent) => {
-        isErasing = true;
-        const rect = canvasElement.getBoundingClientRect();
-        lastX = e.clientX - rect.left;
-        lastY = e.clientY - rect.top;
-      };
-
-      const handlePointerMove = (e: PointerEvent) => {
-        if (!isErasing) return;
-        
-        const rect = canvasElement.getBoundingClientRect();
-        const currentX = e.clientX - rect.left;
-        const currentY = e.clientY - rect.top;
-        
-        // Get the actual 2D context from DOM element
-        const ctx = canvasElement.getContext('2d');
-        if (ctx) {
-          ctx.save();
-          ctx.globalCompositeOperation = "destination-out";
-          ctx.lineWidth = eraserStrokeWidth;
-          ctx.lineCap = "round";
-          ctx.lineJoin = "round";
-          
-          ctx.beginPath();
-          ctx.moveTo(lastX, lastY);
-          ctx.lineTo(currentX, currentY);
-          ctx.stroke();
-          
-          ctx.restore();
+      class EraserBrush extends fabricModule.PencilBrush {
+        _setBrushStyles(ctx: CanvasRenderingContext2D): void {
+          super._setBrushStyles(ctx);
+          // Show a visible preview stroke while dragging.
+          // The actual erase is still applied on path:created with destination-out.
+          ctx.globalCompositeOperation = "source-over";
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
         }
-        
-        lastX = currentX;
-        lastY = currentY;
-      };
+      }
 
-      const handlePointerUp = () => {
-        isErasing = false;
-      };
+      const eraserBrush = new EraserBrush(canvas);
+      canvas.freeDrawingBrush = eraserBrush as FabricCanvas["freeDrawingBrush"];
+      const brush = canvas.freeDrawingBrush as (FabricCanvas["freeDrawingBrush"] & {
+        decimate?: number;
+      }) | undefined;
+      if (!brush) {
+        return;
+      }
 
-      const handlePointerLeave = () => {
-        isErasing = false;
-      };
-
-      // Add event listeners directly to canvas element
-      canvasElement.addEventListener('pointerdown', handlePointerDown);
-      canvasElement.addEventListener('pointermove', handlePointerMove);
-      canvasElement.addEventListener('pointerup', handlePointerUp);
-      canvasElement.addEventListener('pointerleave', handlePointerLeave);
-
-      // Store handlers for cleanup (cast to any for compatibility)
-      toolHandlersRef.current = {
-        down: handlePointerDown as any,
-        move: handlePointerMove as any,
-        up: handlePointerUp as any
-      };
-      
+      brush.color = "#000000";
+      brush.width = eraserStrokeWidth;
+      brush.decimate = PEN_DECIMATE;
+      canvas.isDrawingMode = true;
+      canvas.selection = false;
+      const topContext = (canvas as unknown as { contextTop?: CanvasRenderingContext2D }).contextTop;
+      if (topContext) {
+        topContext.globalCompositeOperation = "source-over";
+      }
       return;
     }
 
@@ -1172,29 +1366,41 @@ function App() {
 
     const emptyDocument: PersistedDocument = {
       pages: [createPage(0)],
-      canvasData: null
+      canvasData: null,
+      journalEntries: createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES)
     };
 
     await applyPersistedDocument(emptyDocument);
+    setActiveArchiveDocumentId(null);
     pendingDocumentSaveRef.current = emptyDocument;
     flushPendingDocumentSaveNow();
     setIsArchiveOpen(false);
     setArchiveMessage("");
-  }, [applyPersistedDocument, flushPendingDocumentSaveNow]);
+  }, [applyPersistedDocument, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
 
   const archiveAndCreateNew = useCallback(async () => {
     const currentDocument = buildCurrentDocumentSnapshot();
+    const previewImages = buildArchivePreviewImages();
     try {
       // Archive current document
-      await archiveBoardDocument(currentDocument);
+      const archivedKey = await archiveBoardDocument(
+        currentDocument,
+        activeArchiveDocumentIdRef.current,
+        previewImages
+      );
+      if (archivedKey) {
+        setActiveArchiveDocumentId(archivedKey);
+      }
       
       // Create new empty document
       const emptyDocument: PersistedDocument = {
         pages: [createPage(0)],
-        canvasData: null
+        canvasData: null,
+        journalEntries: createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES)
       };
 
       await applyPersistedDocument(emptyDocument);
+      setActiveArchiveDocumentId(null);
       pendingDocumentSaveRef.current = emptyDocument;
       flushPendingDocumentSaveNow();
       
@@ -1205,7 +1411,7 @@ function App() {
     } catch {
       setArchiveMessage("Archiviazione fallita");
     }
-  }, [buildCurrentDocumentSnapshot, applyPersistedDocument, flushPendingDocumentSaveNow, loadArchiveEntries]);
+  }, [buildArchivePreviewImages, buildCurrentDocumentSnapshot, applyPersistedDocument, flushPendingDocumentSaveNow, loadArchiveEntries, setActiveArchiveDocumentId]);
 
   const exportPdf = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
@@ -1331,16 +1537,18 @@ function App() {
     if (!window.confirm("Vuoi svuotare tutte le righe del Libro Giornale?")) {
       return;
     }
-    setJournalEntries([createJournalEntry()]);
+    setJournalEntries(createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES));
   }, []);
 
   const removeJournalEntry = useCallback((entryId: string) => {
     setJournalEntries((previous) => {
-      if (previous.length <= 1) {
+      if (previous.length <= MIN_VISIBLE_JOURNAL_ENTRIES) {
         return previous;
       }
       const nextEntries = previous.filter((entry) => entry.id !== entryId);
-      return nextEntries.length > 0 ? nextEntries : [createJournalEntry()];
+      return nextEntries.length > 0
+        ? nextEntries
+        : createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
     });
   }, []);
 
@@ -2058,8 +2266,15 @@ function App() {
   }, [isEraserSizeMenuOpen, isPenSizeMenuOpen]);
 
   useEffect(() => {
+    journalEntriesRef.current = journalEntries;
     localStorage.setItem(JOURNAL_STORAGE_KEY, JSON.stringify(journalEntries));
-  }, [journalEntries]);
+
+    scheduleDocumentSave({
+      pages: pagesRef.current,
+      canvasData: canvasDataRef.current,
+      journalEntries
+    });
+  }, [journalEntries, scheduleDocumentSave]);
 
   useEffect(() => {
     localStorage.setItem(BACKGROUND_STORAGE_KEY, backgroundMode);
@@ -2373,6 +2588,7 @@ function App() {
         entries={journalEntries}
         accounts={PIANO_DEI_CONTI}
         isExtracting={isJournalExtracting}
+        minRows={MIN_VISIBLE_JOURNAL_ENTRIES}
         onClose={() => setIsJournalOpen(false)}
         onExtract={() => void extractJournalData()}
         onAddEntry={addJournalEntry}
@@ -2429,37 +2645,145 @@ function App() {
             </div>
           </header>
           <div className="archive-panel-body">
+            <div className="archive-search">
+              <i className="fa-solid fa-magnifying-glass" />
+              <input
+                value={archiveSearch}
+                onChange={(event) => setArchiveSearch(event.target.value)}
+                placeholder="Cerca file archivio..."
+                aria-label="Cerca file archivio"
+              />
+            </div>
             {isArchiveLoading && <p className="archive-empty">Caricamento archivio...</p>}
             {!isArchiveLoading && archiveEntries.length === 0 && (
               <p className="archive-empty">Nessun documento archiviato.</p>
             )}
-            {!isArchiveLoading && archiveEntries.length > 0 && (
-              <div className="archive-list">
-                {archiveEntries.map((entry) => (
-                  <article className="archive-item" key={entry.id}>
-                    <button
-                      className="archive-open-button"
-                      type="button"
-                      onClick={() => void openArchiveDocument(entry.id)}
-                      title={`Apri ${entry.fileName}`}
-                      aria-label={`Apri ${entry.fileName}`}
+            {!isArchiveLoading && archiveEntries.length > 0 && filteredArchiveEntries.length === 0 && (
+              <p className="archive-empty">Nessun risultato per la ricerca.</p>
+            )}
+            {!isArchiveLoading && filteredArchiveEntries.length > 0 && (
+              <div className="archive-layout">
+                <div className="archive-list">
+                  {filteredArchiveEntries.map((entry) => (
+                    <article
+                      className={`archive-item ${selectedArchiveEntryId === entry.id ? "selected" : ""}`}
+                      key={entry.id}
                     >
-                      <strong>{entry.fileName}</strong>
-                      <span>{formatArchiveDateTime(entry.updatedAt)}</span>
-                      <span>{entry.pageCount} pagine</span>
-                    </button>
-                    <button
-                      className="icon-button"
-                      type="button"
-                      title="Elimina dall'archivio"
-                      aria-label="Elimina dall'archivio"
-                      onClick={() => void removeArchiveDocument(entry.id)}
-                    >
-                      <i className="fa-solid fa-trash" />
-                      <span className="sr-only">Elimina dall'archivio</span>
-                    </button>
-                  </article>
-                ))}
+                      <button
+                        className="archive-select-button"
+                        type="button"
+                        onClick={() => setSelectedArchiveEntryId(entry.id)}
+                        title={`Anteprima ${entry.fileName}`}
+                        aria-label={`Anteprima ${entry.fileName}`}
+                      >
+                        <strong>{entry.fileName}</strong>
+                        <span>{formatArchiveDateTime(entry.updatedAt)}</span>
+                        <span>{entry.pageCount} pagine</span>
+                      </button>
+                      <div className="archive-item-actions">
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title="Apri documento"
+                          aria-label="Apri documento"
+                          onClick={() => void openArchiveDocument(entry.id)}
+                        >
+                          <i className="fa-solid fa-folder-open" />
+                          <span className="sr-only">Apri documento</span>
+                        </button>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title="Rinomina file"
+                          aria-label="Rinomina file"
+                          onClick={() => void renameArchiveDocument(entry.id, entry.fileName)}
+                        >
+                          <i className="fa-solid fa-pen" />
+                          <span className="sr-only">Rinomina file</span>
+                        </button>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title="Elimina dall'archivio"
+                          aria-label="Elimina dall'archivio"
+                          onClick={() => void removeArchiveDocument(entry.id)}
+                        >
+                          <i className="fa-solid fa-trash" />
+                          <span className="sr-only">Elimina dall'archivio</span>
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                <aside className="archive-preview-pane">
+                  {!selectedArchiveEntry && <p className="archive-empty">Seleziona un documento.</p>}
+                  {selectedArchiveEntry && (
+                    <>
+                      <header className="archive-preview-header">
+                        <strong>{selectedArchiveEntry.fileName}</strong>
+                        <span>{selectedArchiveEntry.pageCount} pagine</span>
+                      </header>
+                      <div className="archive-preview-grid">
+                        {Array.from({ length: selectedArchiveEntry.pageCount }, (_unused, index) => {
+                          const image = selectedArchiveEntry.previewImages[index] ?? null;
+                          return (
+                            <figure className="archive-page-thumb" key={`${selectedArchiveEntry.id}-page-${index}`}>
+                              <div className="archive-page-canvas">
+                                {image ? (
+                                  <img
+                                    src={image}
+                                    alt={`Anteprima pagina ${index + 1}`}
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <div className="archive-page-placeholder">Anteprima non disponibile</div>
+                                )}
+                              </div>
+                              <figcaption>Pagina {index + 1}</figcaption>
+                            </figure>
+                          );
+                        })}
+                      </div>
+                      <section className="archive-journal-preview">
+                        <header>
+                          <strong>Anteprima giornale_data</strong>
+                        </header>
+                        {selectedArchiveEntry.journalPreview.length === 0 && (
+                          <p className="archive-empty">Nessuna registrazione giornale nel documento.</p>
+                        )}
+                        {selectedArchiveEntry.journalPreview.length > 0 && (
+                          <div className="archive-journal-table-wrap">
+                            <table className="archive-journal-table">
+                              <thead>
+                                <tr>
+                                  <th>Data</th>
+                                  <th>Cod.</th>
+                                  <th>Conto</th>
+                                  <th>Descrizione</th>
+                                  <th>Dare</th>
+                                  <th>Avere</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {selectedArchiveEntry.journalPreview.map((entry) => (
+                                  <tr key={entry.id}>
+                                    <td>{entry.date || "-"}</td>
+                                    <td>{entry.accountCode || "-"}</td>
+                                    <td>{entry.accountName || "-"}</td>
+                                    <td>{entry.description || "-"}</td>
+                                    <td>{entry.debit || "-"}</td>
+                                    <td>{entry.credit || "-"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </section>
+                    </>
+                  )}
+                </aside>
               </div>
             )}
           </div>

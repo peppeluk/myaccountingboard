@@ -9,6 +9,7 @@ export type JournalEntry = {
   description: string;
   debit: string;
   credit: string;
+  closeLine: boolean;
 };
 
 type JournalPanelProps = {
@@ -16,6 +17,7 @@ type JournalPanelProps = {
   entries: JournalEntry[];
   accounts: readonly AccountOption[];
   isExtracting: boolean;
+  minRows: number;
   onClose: () => void;
   onExtract: () => void;
   onAddEntry: () => void;
@@ -37,6 +39,59 @@ function normalizeForSearch(value: string): string {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .trim();
+}
+
+const amountFormatter = new Intl.NumberFormat("it-IT", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+
+function sanitizeAmountTyping(value: string): string {
+  const stripped = value.replace(/[^\d.,-]/g, "");
+  if (!stripped) {
+    return "";
+  }
+  const withoutExtraMinus = stripped.replace(/(?!^)-/g, "");
+  return withoutExtraMinus;
+}
+
+function parseAmountInput(rawValue: string): number | null {
+  const cleaned = rawValue.replace(/\s/g, "").replace(/[^0-9,.-]/g, "").trim();
+  if (!cleaned || cleaned === "-" || cleaned === "," || cleaned === ".") {
+    return null;
+  }
+
+  const hasComma = cleaned.includes(",");
+  const hasDot = cleaned.includes(".");
+  let normalized = cleaned;
+
+  if (hasComma) {
+    normalized = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (hasDot) {
+    const parts = cleaned.split(".");
+    if (parts.length > 2) {
+      normalized = parts.join("");
+    } else {
+      const [integerPart, fractionPart = ""] = parts;
+      const looksLikeThousands =
+        fractionPart.length === 3 && integerPart.replace("-", "").length <= 3;
+      normalized = looksLikeThousands ? `${integerPart}${fractionPart}` : `${integerPart}.${fractionPart}`;
+    }
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return parsed;
+}
+
+function formatAmountForDisplay(rawValue: string): string {
+  const parsed = parseAmountInput(rawValue);
+  if (parsed === null) {
+    return "";
+  }
+  return amountFormatter.format(parsed);
 }
 
 function AccountPicker({ inputId, entry, accounts, onUpdate }: AccountPickerProps) {
@@ -165,6 +220,7 @@ export function JournalPanel({
   entries,
   accounts,
   isExtracting,
+  minRows,
   onClose,
   onExtract,
   onAddEntry,
@@ -180,41 +236,29 @@ export function JournalPanel({
     <section className="journal-panel" aria-label="Scheda Libro Giornale">
       <header className="journal-panel-header">
         <h3>giornale_data (campi D:E:F:G:H)</h3>
-        <div className="journal-panel-actions">
-          <button type="button" onClick={onExtract} disabled={isExtracting}>
-            {isExtracting ? "Estrazione..." : "Estrai .xlsx"}
-          </button>
-          <button type="button" onClick={onAddEntry}>
-            + Riga
-          </button>
-          <button type="button" onClick={onClearEntries}>
-            Svuota
-          </button>
-          <button type="button" onClick={onClose} className="icon-button" aria-label="Chiudi Libro Giornale">
-            <i className="fa-solid fa-xmark" />
-            <span className="sr-only">Chiudi Libro Giornale</span>
-          </button>
-        </div>
+        <button type="button" onClick={onClose} className="icon-button" aria-label="Chiudi Libro Giornale">
+          <i className="fa-solid fa-xmark" />
+          <span className="sr-only">Chiudi Libro Giornale</span>
+        </button>
       </header>
 
       <div className="journal-table-wrap">
         <table className="journal-table">
           <thead>
             <tr>
-              <th>Riga</th>
-              <th>D - Data</th>
+              <th className="journal-date-column">Data</th>
+              <th className="journal-account-code-column">Codice</th>
               <th>E - Conto</th>
               <th>F - Descrizione</th>
-              <th>G - Dare</th>
-              <th>H - Avere</th>
+              <th className="journal-amount-column">G - Dare</th>
+              <th className="journal-amount-column">H - Avere</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {entries.map((entry, index) => (
+            {entries.map((entry) => (
               <tr key={entry.id}>
-                <td className="journal-row-index">{index + 11}</td>
-                <td>
+                <td className="journal-date-cell">
                   <input
                     type="date"
                     value={entry.date}
@@ -223,7 +267,10 @@ export function JournalPanel({
                     }}
                   />
                 </td>
-                <td className="journal-account-cell">
+                <td className="journal-account-code-cell">
+                  {entry.accountCode || <span className="journal-account-code-placeholder">-</span>}
+                </td>
+                <td className={entry.closeLine ? "journal-account-cell journal-close-line-cell" : "journal-account-cell"}>
                   <AccountPicker
                     inputId={`journal-account-${entry.id}`}
                     entry={entry}
@@ -231,7 +278,7 @@ export function JournalPanel({
                     onUpdate={(patch) => onUpdateEntry(entry.id, patch)}
                   />
                 </td>
-                <td>
+                <td className={entry.closeLine ? "journal-close-line-cell" : undefined}>
                   <input
                     value={entry.description}
                     onChange={(event) => {
@@ -240,22 +287,28 @@ export function JournalPanel({
                     placeholder="Descrizione movimento"
                   />
                 </td>
-                <td>
+                <td className="journal-amount-cell">
                   <input
                     value={entry.debit}
                     inputMode="decimal"
                     onChange={(event) => {
-                      onUpdateEntry(entry.id, { debit: event.target.value });
+                      onUpdateEntry(entry.id, { debit: sanitizeAmountTyping(event.target.value) });
+                    }}
+                    onBlur={() => {
+                      onUpdateEntry(entry.id, { debit: formatAmountForDisplay(entry.debit) });
                     }}
                     placeholder="0,00"
                   />
                 </td>
-                <td>
+                <td className="journal-amount-cell">
                   <input
                     value={entry.credit}
                     inputMode="decimal"
                     onChange={(event) => {
-                      onUpdateEntry(entry.id, { credit: event.target.value });
+                      onUpdateEntry(entry.id, { credit: sanitizeAmountTyping(event.target.value) });
+                    }}
+                    onBlur={() => {
+                      onUpdateEntry(entry.id, { credit: formatAmountForDisplay(entry.credit) });
                     }}
                     placeholder="0,00"
                   />
@@ -263,10 +316,20 @@ export function JournalPanel({
                 <td className="journal-remove-cell">
                   <button
                     type="button"
+                    className={`icon-button ${entry.closeLine ? "active" : ""}`}
+                    aria-label={entry.closeLine ? "Rimuovi linea di chiusura" : "Aggiungi linea di chiusura"}
+                    onClick={() => onUpdateEntry(entry.id, { closeLine: !entry.closeLine })}
+                    title="Chiudi registrazione"
+                  >
+                    <i className="fa-solid fa-minus" />
+                    <span className="sr-only">Chiudi registrazione</span>
+                  </button>
+                  <button
+                    type="button"
                     className="icon-button"
-                    aria-label={`Rimuovi riga ${index + 11}`}
+                    aria-label="Rimuovi riga"
                     onClick={() => onRemoveEntry(entry.id)}
-                    disabled={entries.length <= 1}
+                    disabled={entries.length <= minRows}
                   >
                     <i className="fa-solid fa-trash" />
                     <span className="sr-only">Rimuovi riga</span>
@@ -279,8 +342,21 @@ export function JournalPanel({
       </div>
 
       <footer className="journal-panel-footer">
-        Il campo E usa il piano dei conti caricato dal modello. Il file estratto aggiorna il foglio tecnico
-        LIBRO_GIORNALE.
+        <div className="journal-panel-actions journal-panel-actions-bottom">
+          <button type="button" onClick={onAddEntry}>
+            + Riga
+          </button>
+          <button type="button" onClick={onClearEntries}>
+            Svuota
+          </button>
+          <button type="button" onClick={onExtract} disabled={isExtracting}>
+            {isExtracting ? "Estrazione..." : "Estrai .xlsx"}
+          </button>
+        </div>
+        <p>
+          Il campo E usa il piano dei conti caricato dal modello. Il file estratto aggiorna il foglio tecnico
+          LIBRO_GIORNALE.
+        </p>
       </footer>
     </section>
   );
