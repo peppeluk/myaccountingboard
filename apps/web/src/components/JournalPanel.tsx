@@ -42,8 +42,10 @@ function normalizeForSearch(value: string): string {
 }
 
 const amountFormatter = new Intl.NumberFormat("it-IT", {
+  style: 'decimal',
   minimumFractionDigits: 2,
-  maximumFractionDigits: 2
+  maximumFractionDigits: 2,
+  useGrouping: true,
 });
 
 function sanitizeAmountTyping(value: string): string {
@@ -75,7 +77,22 @@ function parseAmountInput(rawValue: string): number | null {
       const [integerPart, fractionPart = ""] = parts;
       const looksLikeThousands =
         fractionPart.length === 3 && integerPart.replace("-", "").length <= 3;
-      normalized = looksLikeThousands ? `${integerPart}${fractionPart}` : `${integerPart}.${fractionPart}`;
+      const looksLikeDecimal =
+        fractionPart.length <= 2 && integerPart.replace("-", "").length >= 1;
+
+      if (looksLikeThousands) {
+        // Es: 1.234 -> 1234
+        normalized = `${integerPart}${fractionPart}`;
+      } else if (looksLikeDecimal) {
+        // Es: 12.34 -> 12.34
+        normalized = `${integerPart}.${fractionPart}`;
+      } else if (fractionPart.length > 2) {
+        // Es: 12.345 -> 12345 (treat as thousands)
+        normalized = `${integerPart}${fractionPart}`;
+      } else {
+        // Default: treat as decimal
+        normalized = `${integerPart}.${fractionPart}`;
+      }
     }
   }
 

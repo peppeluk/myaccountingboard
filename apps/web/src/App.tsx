@@ -2,14 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
-import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine } from "./lib/lazyImports";
+import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
 import {
   archiveBoardDocument,
   deleteArchivedBoardDocument,
   listArchivedBoardDocuments,
+  loadAppSettings,
   loadArchivedBoardDocument,
   loadLastBoardDocument,
   renameArchivedBoardDocument,
+  saveAppSettings,
   saveLastBoardDocument,
   type ArchivedBoardDocument,
   type BoardDocument
@@ -24,6 +26,8 @@ type Page = {
   name: string;
 };
 
+type PageCanvasDataMap = Record<string, string | null>;
+
 type PersistedDocument = BoardDocument;
 
 type ToolHandlers = {
@@ -31,6 +35,7 @@ type ToolHandlers = {
   move?: (event: unknown) => void;
   up?: (event: unknown) => void;
   leave?: (event: unknown) => void;
+  cleanup?: () => void;
 };
 
 type SelectionRect = {
@@ -40,10 +45,11 @@ type SelectionRect = {
   height: number;
 };
 
-const LEGACY_STORAGE_KEY = "myaccounting.whiteboard.pages.v1";
-const JOURNAL_STORAGE_KEY = "myaccounting.journal.entries.v1";
-const BACKGROUND_STORAGE_KEY = "myaccounting.whiteboard.background.v1";
-const ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY = "myaccounting.archive.active.v1";
+type VirtualWindowRange = {
+  startIndex: number;
+  endIndex: number;
+};
+
 const MAX_JOURNAL_ENTRIES = 202;
 const MIN_VISIBLE_JOURNAL_ENTRIES = 10;
 const PAGE_HEIGHT = 1600;
@@ -63,6 +69,9 @@ const GRID_BACKGROUND_COLOR = "rgba(148, 163, 184, 0.35)";
 const GRID_BACKGROUND_SIZE = 28;
 const GRID_BACKGROUND_LINE_WIDTH = 1;
 const DOCUMENT_SAVE_DEBOUNCE_MS = 500;
+const VIRTUALIZATION_BUFFER_PAGES = 1;
+const CANVAS_POOL_SIZE = 6;
+const COPY_PASTE_OFFSET = 18;
 const SIZE_POPOVER_HALF_WIDTH = 72;
 const SIZE_POPOVER_MARGIN = 8;
 const SIZE_LEVELS: Array<{ key: SizeLevel; label: string }> = [
@@ -146,42 +155,15 @@ function ensureMinimumJournalEntries(entries: JournalEntry[]): JournalEntry[] {
 }
 
 function loadInitialJournalEntries(): JournalEntry[] {
-  try {
-    const raw = localStorage.getItem(JOURNAL_STORAGE_KEY);
-    if (!raw) {
-      return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
-    }
-
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
-    }
-
-    return ensureMinimumJournalEntries(normalizeJournalEntries(parsed));
-  } catch {
-    return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
-  }
+  return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
 }
 
 function loadInitialBackgroundMode(): BackgroundMode {
-  try {
-    const raw = localStorage.getItem(BACKGROUND_STORAGE_KEY);
-    return raw === "grid" ? "grid" : "plain";
-  } catch {
-    return "plain";
-  }
+  return "plain";
 }
 
 function loadActiveArchiveDocumentId(): string | null {
-  try {
-    const raw = localStorage.getItem(ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY);
-    if (!raw || !raw.startsWith("archive:")) {
-      return null;
-    }
-    return raw;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function createPage(index: number): Page {
@@ -193,10 +175,6 @@ function createPage(index: number): Page {
 
 function getPageTop(index: number): number {
   return index * (PAGE_HEIGHT + PAGE_SEPARATOR_HEIGHT);
-}
-
-function getDocumentHeight(pageCount: number): number {
-  return pageCount * PAGE_HEIGHT + Math.max(0, pageCount - 1) * PAGE_SEPARATOR_HEIGHT;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -273,85 +251,14 @@ function drawGridBackground(
   context.restore();
 }
 
-function loadLegacyDocumentFromLocalStorage(): PersistedDocument | null {
-  try {
-    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw) as unknown;
-
-    // Backward compatibility: legacy format was Page[] with per-page canvasData
-    if (Array.isArray(parsed)) {
-      const legacyPages = parsed
-        .map((item, index) => {
-          if (!item || typeof item !== "object") {
-            return null;
-          }
-          const page = item as Partial<Page> & { canvasData?: string };
-          return {
-            id: typeof page.id === "string" ? page.id : `page-${index}`,
-            name: typeof page.name === "string" ? page.name : `Pagina ${index + 1}`
-          } satisfies Page;
-        })
-        .filter((item): item is Page => item !== null);
-
-      const canvasData =
-        typeof (parsed[0] as { canvasData?: unknown } | undefined)?.canvasData === "string"
-          ? ((parsed[0] as { canvasData?: string }).canvasData ?? null)
-          : null;
-
-      return legacyPages.length > 0
-        ? {
-            pages: legacyPages,
-            canvasData,
-            journalEntries: loadInitialJournalEntries()
-          }
-        : null;
-    }
-
-    if (!parsed || typeof parsed !== "object") {
-      return null;
-    }
-
-    const persisted = parsed as Partial<PersistedDocument>;
-    const normalizedPages = Array.isArray(persisted.pages)
-      ? persisted.pages
-          .map((item, index) => {
-            if (!item || typeof item !== "object") {
-              return null;
-            }
-            const page = item as Partial<Page>;
-            return {
-              id: typeof page.id === "string" ? page.id : `page-${index}`,
-              name: typeof page.name === "string" ? page.name : `Pagina ${index + 1}`
-            } satisfies Page;
-          })
-          .filter((item): item is Page => item !== null)
-      : [];
-
-    if (normalizedPages.length === 0) {
-      return null;
-    }
-
-    const normalizedJournalEntries = ensureMinimumJournalEntries(
-      normalizeJournalEntries((persisted as { journalEntries?: unknown }).journalEntries)
-    );
-
-    return {
-      pages: normalizedPages,
-      canvasData: typeof persisted.canvasData === "string" ? persisted.canvasData : null,
-      journalEntries: normalizedJournalEntries
-    };
-  } catch {
-    return null;
-  }
-}
-
 function loadInitialDocument(): PersistedDocument {
+  const firstPage = createPage(0);
   return {
-    pages: [createPage(0)],
+    pages: [firstPage],
     canvasData: null,
+    pageCanvasData: {
+      [firstPage.id]: null
+    },
     journalEntries: loadInitialJournalEntries()
   };
 }
@@ -434,8 +341,61 @@ function buildDocumentBaseName(timestamp: number): string {
   return `MA_${d}${m}_${h}${min}${s}`;
 }
 
+function normalizePageCanvasDataForPages(
+  pages: Page[],
+  input?: Record<string, string | null> | null,
+  legacyCanvasData?: string | null
+): PageCanvasDataMap {
+  const source = input ?? {};
+  return pages.reduce<PageCanvasDataMap>((acc, page, index) => {
+    const nextValue = source[page.id];
+    if (typeof nextValue === "string" || nextValue === null) {
+      acc[page.id] = nextValue;
+      return acc;
+    }
+    if (index === 0 && typeof legacyCanvasData === "string") {
+      acc[page.id] = legacyCanvasData;
+      return acc;
+    }
+    acc[page.id] = null;
+    return acc;
+  }, {});
+}
+
+function computeVirtualWindowRange(
+  scrollTop: number,
+  viewportHeight: number,
+  pageCount: number,
+  bufferSize: number
+): VirtualWindowRange {
+  if (pageCount <= 0) {
+    return { startIndex: 0, endIndex: -1 };
+  }
+  const step = PAGE_HEIGHT + PAGE_SEPARATOR_HEIGHT;
+  const firstVisible = Math.floor(Math.max(0, scrollTop) / step);
+  const lastVisible = Math.floor(Math.max(0, scrollTop + Math.max(1, viewportHeight) - 1) / step);
+  return {
+    startIndex: clamp(firstVisible - bufferSize, 0, pageCount - 1),
+    endIndex: clamp(lastVisible + bufferSize, 0, pageCount - 1)
+  };
+}
+
+function buildIndexRange(startIndex: number, endIndex: number): number[] {
+  if (endIndex < startIndex) {
+    return [];
+  }
+  return Array.from({ length: endIndex - startIndex + 1 }, (_unused, offset) => startIndex + offset);
+}
+
 function App() {
   const initialDocumentRef = useRef<PersistedDocument>(loadInitialDocument());
+  const initialPageCanvasDataRef = useRef<PageCanvasDataMap>(
+    normalizePageCanvasDataForPages(
+      initialDocumentRef.current.pages,
+      initialDocumentRef.current.pageCanvasData,
+      initialDocumentRef.current.canvasData
+    )
+  );
   const [pages, setPages] = useState<Page[]>(() => initialDocumentRef.current.pages);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [tool, setTool] = useState<Tool>("pen");
@@ -464,28 +424,56 @@ function App() {
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
   const [display, setDisplay] = useState("");
   const [isCanvasReady, setIsCanvasReady] = useState(false);
+  const [virtualWindowRange, setVirtualWindowRange] = useState<VirtualWindowRange>({ startIndex: 0, endIndex: 0 });
+  const [intersectingPageIds, setIntersectingPageIds] = useState<string[]>([]);
+  const [slotAssignments, setSlotAssignments] = useState<Array<string | null>>(
+    () => Array.from({ length: CANVAS_POOL_SIZE }, () => null)
+  );
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const boardPagesRef = useRef<HTMLDivElement | null>(null);
   const penToolRef = useRef<HTMLDivElement | null>(null);
   const eraserToolRef = useRef<HTMLDivElement | null>(null);
-  const drawingCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const selectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const drawingCanvasElementsRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const selectionCanvasElementsRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const pageSentinelElementsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const drawingCanvasRefCallbacksRef = useRef<Map<number, (node: HTMLCanvasElement | null) => void>>(new Map());
+  const selectionCanvasRefCallbacksRef = useRef<Map<number, (node: HTMLCanvasElement | null) => void>>(new Map());
+  const pageSentinelRefCallbacksRef = useRef<Map<string, (node: HTMLDivElement | null) => void>>(new Map());
   const eraserPreviewRef = useRef<HTMLDivElement | null>(null);
 
-  const fabricCanvasRef = useRef<FabricCanvas | null>(null);
+  const fabricCanvasMapRef = useRef<Map<number, FabricCanvas>>(new Map());
+  const pageSlotMapRef = useRef<Map<string, number>>(new Map());
+  const slotPageMapRef = useRef<Map<number, string>>(new Map());
+  const slotLoadTokenRef = useRef<Record<number, number>>({});
+  const activeCanvasPageIdRef = useRef<string | null>(null);
   const activeLineRef = useRef<FabricLine | null>(null);
   const fabricModuleRef = useRef<typeof import("fabric") | null>(null);
   const toolHandlersRef = useRef<ToolHandlers>({});
   const activeToolRef = useRef<Tool>("pen");
-  const selectionDragRef = useRef<{ active: boolean; startX: number; startY: number }>({
+  const clipboardObjectRef = useRef<unknown | null>(null);
+  const clipboardSourcePageIdRef = useRef<string | null>(null);
+  const selectionDragRef = useRef<{ active: boolean; startX: number; startY: number; pageId: string | null }>({
     active: false,
     startX: 0,
-    startY: 0
+    startY: 0,
+    pageId: null
   });
+  const multiSelectionRef = useRef<{
+    active: boolean;
+    startPoint: { x: number; y: number } | null;
+    currentPoint: { x: number; y: number } | null;
+    pageId: string | null;
+  }>({
+    active: false,
+    startPoint: null,
+    currentPoint: null,
+    pageId: null
+  });
+  const selectedObjectsRef = useRef<Set<string>>(new Set());
 
   const pagesRef = useRef<Page[]>(pages);
-  const canvasDataRef = useRef<string | null>(initialDocumentRef.current.canvasData);
+  const pageCanvasDataRef = useRef<PageCanvasDataMap>(initialPageCanvasDataRef.current);
   const journalEntriesRef = useRef<JournalEntry[]>(initialDocumentRef.current.journalEntries);
   const currentPageIndexRef = useRef(currentPageIndex);
   const pendingDocumentSaveRef = useRef<PersistedDocument | null>(null);
@@ -493,19 +481,18 @@ function App() {
   const hasHydratedFromIndexedDbRef = useRef(false);
   const hasArchivedOnExitRef = useRef(false);
   const activeArchiveDocumentIdRef = useRef<string | null>(loadActiveArchiveDocumentId());
-  const undoStackRef = useRef<string[]>([]);
-  const redoStackRef = useRef<string[]>([]);
+  const historyStacksRef = useRef<Record<string, { undo: string[]; redo: string[] }>>({});
   const isRestoringRef = useRef(false);
   const isAutoAddingPageRef = useRef(false);
   const toolLongPressTimeoutRef = useRef<number | null>(null);
   const suppressToolClickRef = useRef(false);
   const autoOcrTimeoutRef = useRef<number | null>(null);
-  const autoOcrRectRef = useRef<SelectionRect | null>(null);
+  const autoOcrRectRef = useRef<{ pageId: string; rect: SelectionRect } | null>(null);
   const isOcrEnabledRef = useRef(false);
   const isAutoOcrBusyRef = useRef(false);
   const lastOcrChunkRef = useRef<string>("");
   const clearAutoOcrScheduleRef = useRef<() => void>(() => undefined);
-  const scheduleAutoOcrForRectRef = useRef<(rect: SelectionRect) => void>(() => undefined);
+  const scheduleAutoOcrForRectRef = useRef<(pageId: string, rect: SelectionRect) => void>(() => undefined);
 
   const workerRef = useRef<OcrWorker | null>(null);
   const workerInitPromiseRef = useRef<Promise<OcrWorker> | null>(null);
@@ -528,25 +515,113 @@ function App() {
     [filteredArchiveEntries, selectedArchiveEntryId]
   );
 
+  const pageIndexById = useMemo(() => {
+    return pages.reduce<Map<string, number>>((acc, page, index) => {
+      acc.set(page.id, index);
+      return acc;
+    }, new Map());
+  }, [pages]);
+
+  const windowPageIndexes = useMemo(
+    () => buildIndexRange(virtualWindowRange.startIndex, virtualWindowRange.endIndex),
+    [virtualWindowRange.endIndex, virtualWindowRange.startIndex]
+  );
+
+  const renderPageIds = useMemo(() => {
+    const intersectingSet = new Set(intersectingPageIds);
+    const ids = new Set<string>();
+    for (const index of windowPageIndexes) {
+      const page = pages[index];
+      if (page) {
+        ids.add(page.id);
+      }
+    }
+    for (let index = 0; index < pages.length; index += 1) {
+      const page = pages[index];
+      if (page && intersectingSet.has(page.id)) {
+        ids.add(page.id);
+      }
+    }
+    const currentPageId = pages[currentPageIndex]?.id;
+    if (currentPageId) {
+      ids.add(currentPageId);
+    }
+
+    const orderedIds = pages
+      .map((page) => page.id)
+      .filter((pageId) => ids.has(pageId));
+
+    if (orderedIds.length <= CANVAS_POOL_SIZE) {
+      return orderedIds;
+    }
+
+    const current = pages[currentPageIndex]?.id ?? orderedIds[0];
+    const prioritized = orderedIds
+      .map((pageId) => ({
+        pageId,
+        distance: Math.abs((pageIndexById.get(pageId) ?? 0) - currentPageIndex),
+        isCurrent: pageId === current
+      }))
+      .sort((a, b) => {
+        if (a.isCurrent) {
+          return -1;
+        }
+        if (b.isCurrent) {
+          return 1;
+        }
+        return a.distance - b.distance;
+      })
+      .slice(0, CANVAS_POOL_SIZE)
+      .map((item) => item.pageId);
+
+    return pages
+      .map((page) => page.id)
+      .filter((pageId) => prioritized.includes(pageId));
+  }, [currentPageIndex, intersectingPageIds, pageIndexById, pages, windowPageIndexes]);
+
+  const getCurrentPageId = useCallback(() => {
+    return pagesRef.current[currentPageIndexRef.current]?.id ?? null;
+  }, []);
+
+  const getCanvasByPageId = useCallback((pageId: string | null) => {
+    if (!pageId) {
+      return null;
+    }
+    const slotId = pageSlotMapRef.current.get(pageId);
+    if (slotId === undefined) {
+      return null;
+    }
+    return fabricCanvasMapRef.current.get(slotId) ?? null;
+  }, []);
+
+  const getActiveCanvas = useCallback(() => {
+    return getCanvasByPageId(getCurrentPageId());
+  }, [getCanvasByPageId, getCurrentPageId]);
+
+  const getSelectionCanvasByPageId = useCallback((pageId: string | null) => {
+    if (!pageId) {
+      return null;
+    }
+    const slotId = pageSlotMapRef.current.get(pageId);
+    if (slotId === undefined) {
+      return null;
+    }
+    return selectionCanvasElementsRef.current.get(slotId) ?? null;
+  }, []);
+
   const syncCanvasOffset = useCallback(() => {
-    const canvas = fabricCanvasRef.current;
+    const canvas = getActiveCanvas();
     if (!canvas) {
       return;
     }
     canvas.calcOffset();
-  }, []);
+  }, [getActiveCanvas]);
 
   const setActiveArchiveDocumentId = useCallback((archiveId: string | null) => {
     activeArchiveDocumentIdRef.current = archiveId;
-    try {
-      if (archiveId) {
-        localStorage.setItem(ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY, archiveId);
-      } else {
-        localStorage.removeItem(ACTIVE_ARCHIVE_DOCUMENT_ID_STORAGE_KEY);
-      }
-    } catch {
-      // Ignore storage sync errors.
-    }
+    void saveAppSettings({
+      activeArchiveDocumentId: archiveId
+    }).catch(() => undefined);
   }, []);
 
   const flushDocumentSave = useCallback(() => {
@@ -555,13 +630,7 @@ function App() {
       return;
     }
     pendingDocumentSaveRef.current = null;
-    void saveLastBoardDocument(pendingDocument).catch(() => {
-      try {
-        localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(pendingDocument));
-      } catch {
-        // Ignore fallback write errors.
-      }
-    });
+    void saveLastBoardDocument(pendingDocument).catch(() => undefined);
   }, []);
 
   const flushPendingDocumentSaveNow = useCallback(() => {
@@ -575,20 +644,7 @@ function App() {
       return;
     }
     pendingDocumentSaveRef.current = null;
-
-    try {
-      localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(pendingDocument));
-    } catch {
-      // Ignore fallback write errors.
-    }
-
-    void saveLastBoardDocument(pendingDocument).catch(() => {
-      try {
-        localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(pendingDocument));
-      } catch {
-        // Ignore fallback write errors.
-      }
-    });
+    void saveLastBoardDocument(pendingDocument).catch(() => undefined);
   }, []);
 
   const scheduleDocumentSave = useCallback(
@@ -605,21 +661,32 @@ function App() {
     [flushDocumentSave]
   );
 
-  const persistDocument = useCallback((nextPages: Page[], nextCanvasData: string | null) => {
-    pagesRef.current = nextPages;
-    canvasDataRef.current = nextCanvasData;
-    setPages(nextPages);
-    scheduleDocumentSave({
-      pages: nextPages,
-      canvasData: nextCanvasData,
-      journalEntries: journalEntriesRef.current
-    } satisfies PersistedDocument);
-  }, [scheduleDocumentSave]);
+  const buildPersistedDocument = useCallback(
+    (nextPages: Page[], nextPageCanvasData: PageCanvasDataMap, nextJournalEntries: JournalEntry[]): PersistedDocument => {
+      const firstPageId = nextPages[0]?.id ?? null;
+      return {
+        pages: nextPages,
+        canvasData: firstPageId ? nextPageCanvasData[firstPageId] ?? null : null,
+        pageCanvasData: nextPageCanvasData,
+        journalEntries: nextJournalEntries
+      };
+    },
+    []
+  );
 
-  const snapshotCanvas = useCallback((): string | null => {
-    const canvas = fabricCanvasRef.current;
+  const persistDocument = useCallback((nextPages: Page[], nextPageCanvasData: PageCanvasDataMap) => {
+    pagesRef.current = nextPages;
+    pageCanvasDataRef.current = nextPageCanvasData;
+    setPages(nextPages);
+    scheduleDocumentSave(
+      buildPersistedDocument(nextPages, nextPageCanvasData, journalEntriesRef.current) satisfies PersistedDocument
+    );
+  }, [buildPersistedDocument, scheduleDocumentSave]);
+
+  const snapshotCanvasByPageId = useCallback((pageId: string): string | null => {
+    const canvas = getCanvasByPageId(pageId);
     if (!canvas) {
-      return null;
+      return pageCanvasDataRef.current[pageId] ?? null;
     }
     const json = canvas.toJSON();
     return JSON.stringify(json, (_key, value: unknown) => {
@@ -628,10 +695,10 @@ function App() {
       }
       return value;
     });
-  }, []);
+  }, [getCanvasByPageId]);
 
-  const applyBrushSettings = useCallback(() => {
-    const canvas = fabricCanvasRef.current;
+  const applyBrushSettings = useCallback((targetCanvas?: FabricCanvas | null) => {
+    const canvas = targetCanvas ?? getActiveCanvas();
     const fabricModule = fabricModuleRef.current;
     if (!canvas || !fabricModule) {
       return;
@@ -654,10 +721,56 @@ function App() {
     brush.color = color;
     brush.width = penStrokeWidth;
     brush.decimate = PEN_DECIMATE;
-  }, [color, penStrokeWidth]);
+  }, [color, getActiveCanvas, penStrokeWidth]);
 
-  const clearSelectionOverlay = useCallback(() => {
-    const selectionCanvas = selectionCanvasRef.current;
+  const setCanvasPanObjectInteractivity = useCallback((canvas: FabricCanvas | null | undefined, enabled: boolean) => {
+    if (!canvas) {
+      return;
+    }
+    const canvasApi = canvas as unknown as {
+      getObjects?: () => unknown[];
+    };
+    const objects = canvasApi.getObjects?.() ?? [];
+    for (const object of objects) {
+      const objApi = object as {
+        selectable?: boolean;
+        evented?: boolean;
+        globalCompositeOperation?: string;
+        setCoords?: () => void;
+        __panPrevSelectable?: boolean;
+        __panPrevEvented?: boolean;
+      };
+      if (enabled) {
+        if (objApi.globalCompositeOperation === "destination-out") {
+          continue;
+        }
+        if (objApi.__panPrevSelectable === undefined) {
+          objApi.__panPrevSelectable = objApi.selectable !== false;
+        }
+        if (objApi.__panPrevEvented === undefined) {
+          objApi.__panPrevEvented = objApi.evented !== false;
+        }
+        objApi.selectable = true;
+        objApi.evented = true;
+        objApi.setCoords?.();
+        continue;
+      }
+      if (objApi.__panPrevSelectable !== undefined) {
+        objApi.selectable = objApi.__panPrevSelectable;
+        delete objApi.__panPrevSelectable;
+      }
+      if (objApi.__panPrevEvented !== undefined) {
+        objApi.evented = objApi.__panPrevEvented;
+        delete objApi.__panPrevEvented;
+      }
+      objApi.setCoords?.();
+    }
+    canvas.requestRenderAll();
+  }, []);
+
+  const clearSelectionOverlay = useCallback((pageId?: string | null) => {
+    const resolvedPageId = pageId ?? getCurrentPageId();
+    const selectionCanvas = getSelectionCanvasByPageId(resolvedPageId);
     if (!selectionCanvas) {
       return;
     }
@@ -666,7 +779,7 @@ function App() {
       return;
     }
     context.clearRect(0, 0, selectionCanvas.width, selectionCanvas.height);
-  }, []);
+  }, [getCurrentPageId, getSelectionCanvasByPageId]);
 
   const hideEraserPreview = useCallback(() => {
     const preview = eraserPreviewRef.current;
@@ -740,16 +853,13 @@ function App() {
     [eraserStrokeWidth, hideEraserPreview, isOcrRunning, isSelectionMode, tool]
   );
 
-  const loadCanvasData = useCallback(
-    async (canvasData: string | null) => {
-      const canvas = fabricCanvasRef.current;
-      if (!canvas) {
-        return;
-      }
-
+  const loadCanvasDataIntoCanvas = useCallback(
+    async (canvas: FabricCanvas, canvasData: string | null, pageIdForOverlay?: string) => {
       isRestoringRef.current = true;
       canvas.clear();
-      clearSelectionOverlay();
+      if (pageIdForOverlay) {
+        clearSelectionOverlay(pageIdForOverlay);
+      }
 
       if (canvasData) {
         const parsed = JSON.parse(canvasData) as Record<string, unknown>;
@@ -761,80 +871,218 @@ function App() {
     [clearSelectionOverlay]
   );
 
-  const resetHistory = useCallback(() => {
-    const snapshot = snapshotCanvas();
-    undoStackRef.current = snapshot ? [snapshot] : [];
-    redoStackRef.current = [];
-  }, [snapshotCanvas]);
+  const loadCanvasDataForPage = useCallback(
+    async (pageId: string, canvasData: string | null) => {
+      const canvas = getCanvasByPageId(pageId);
+      if (!canvas) {
+        return;
+      }
+      await loadCanvasDataIntoCanvas(canvas, canvasData, pageId);
+    },
+    [getCanvasByPageId, loadCanvasDataIntoCanvas]
+  );
+
+  const resetHistoryForPage = useCallback((pageId: string) => {
+    const snapshot = snapshotCanvasByPageId(pageId);
+    historyStacksRef.current[pageId] = {
+      undo: snapshot ? [snapshot] : [],
+      redo: []
+    };
+  }, [snapshotCanvasByPageId]);
 
   const persistCurrentDocument = useCallback(() => {
-    const snapshot = snapshotCanvas();
+    const pageId = getCurrentPageId();
+    if (!pageId) {
+      return;
+    }
+    const snapshot = snapshotCanvasByPageId(pageId);
     if (!snapshot) {
       return;
     }
-    if (canvasDataRef.current === snapshot) {
+    if (pageCanvasDataRef.current[pageId] === snapshot) {
       return;
     }
-    persistDocument(pagesRef.current, snapshot);
-  }, [persistDocument, snapshotCanvas]);
+    persistDocument(pagesRef.current, {
+      ...pageCanvasDataRef.current,
+      [pageId]: snapshot
+    });
+  }, [getCurrentPageId, persistDocument, snapshotCanvasByPageId]);
 
   const applyPersistedDocument = useCallback(
     async (document: PersistedDocument) => {
       const normalizedPages = document.pages.length > 0 ? document.pages : [createPage(0)];
+      const normalizedPageCanvasData = normalizePageCanvasDataForPages(
+        normalizedPages,
+        document.pageCanvasData,
+        document.canvasData
+      );
       const normalizedJournalEntries = ensureMinimumJournalEntries(
         normalizeJournalEntries(document.journalEntries)
       );
       pagesRef.current = normalizedPages;
-      canvasDataRef.current = document.canvasData;
+      pageCanvasDataRef.current = normalizedPageCanvasData;
       journalEntriesRef.current = normalizedJournalEntries;
       currentPageIndexRef.current = 0;
       setCurrentPageIndex(0);
       setPages(normalizedPages);
       setJournalEntries(normalizedJournalEntries);
+      historyStacksRef.current = {};
 
-      if (!fabricCanvasRef.current) {
-        return;
-      }
-
-      await loadCanvasData(document.canvasData);
-      resetHistory();
+      await Promise.all(
+        normalizedPages.map(async (page) => {
+          await loadCanvasDataForPage(page.id, normalizedPageCanvasData[page.id] ?? null);
+          resetHistoryForPage(page.id);
+        })
+      );
       containerRef.current?.scrollTo({ top: 0, behavior: "auto" });
     },
-    [loadCanvasData, resetHistory]
+    [loadCanvasDataForPage, resetHistoryForPage]
   );
 
   const buildCurrentDocumentSnapshot = useCallback((): PersistedDocument => {
     const normalizedPages = pagesRef.current.length > 0 ? pagesRef.current : [createPage(0)];
-    const snapshot = snapshotCanvas();
-    return {
-      pages: normalizedPages,
-      canvasData: snapshot ?? canvasDataRef.current,
-      journalEntries: journalEntriesRef.current
-    };
-  }, [snapshotCanvas]);
-
-  const buildArchivePreviewImages = useCallback((): string[] => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas) {
-      return [];
+    const nextPageCanvasData = { ...pageCanvasDataRef.current };
+    const activePageId = getCurrentPageId();
+    if (activePageId) {
+      const activeSnapshot = snapshotCanvasByPageId(activePageId);
+      if (activeSnapshot) {
+        nextPageCanvasData[activePageId] = activeSnapshot;
+      }
     }
-    const sourceCanvas = (canvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl;
-    if (!sourceCanvas) {
-      return [];
-    }
+    return buildPersistedDocument(normalizedPages, nextPageCanvasData, journalEntriesRef.current);
+  }, [buildPersistedDocument, getCurrentPageId, snapshotCanvasByPageId]);
 
+  const checkDocumentHasContent = useCallback((document: PersistedDocument): boolean => {
+    // Controlla se ci sono oggetti nei canvas
+    for (const pageId of Object.keys(document.pageCanvasData)) {
+      const canvas = getCanvasByPageId(pageId);
+      if (canvas && canvas.getObjects().length > 0) {
+        return true;
+      }
+    }
+    
+    // Controlla se ci sono voci nel giornale non vuote
+    const hasJournalContent = document.journalEntries.some(entry => 
+      entry.date.trim() || 
+      entry.accountName.trim() || 
+      entry.description.trim() || 
+      entry.debit.trim() || 
+      entry.credit.trim()
+    );
+    
+    return hasJournalContent;
+  }, [getCanvasByPageId]);
+
+  const buildArchivePreviewImages = useCallback(async (): Promise<string[]> => {
     try {
-      const canvasWidth = Math.max(1, canvas.getWidth());
-      const canvasHeight = Math.max(1, canvas.getHeight());
-      const previewHeight = Math.max(
-        1,
-        Math.round((PAGE_HEIGHT / canvasWidth) * ARCHIVE_PREVIEW_WIDTH)
-      );
-      const sourceScaleX = sourceCanvas.width / canvasWidth;
-      const sourceScaleY = sourceCanvas.height / canvasHeight;
+      const previewImages: string[] = [];
+      const baseWidth = Math.max(1, Math.floor(containerRef.current?.clientWidth ?? 1200));
+      const previewHeight = Math.max(1, Math.round((PAGE_HEIGHT / baseWidth) * ARCHIVE_PREVIEW_WIDTH));
+      const gridMultiplier = ARCHIVE_PREVIEW_WIDTH / baseWidth;
+
+      for (let index = 0; index < pagesRef.current.length; index += 1) {
+        const page = pagesRef.current[index];
+        const previewCanvas = document.createElement("canvas");
+        previewCanvas.width = ARCHIVE_PREVIEW_WIDTH;
+        previewCanvas.height = previewHeight;
+        const context = previewCanvas.getContext("2d");
+        if (!context) {
+          continue;
+        }
+
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+
+        if (backgroundMode === "grid") {
+          drawGridBackground(
+            context,
+            previewCanvas.width,
+            previewCanvas.height,
+            gridMultiplier
+          );
+        }
+
+        const mountedCanvas = getCanvasByPageId(page.id);
+        const mountedSource = mountedCanvas
+          ? (mountedCanvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl
+          : null;
+        if (mountedSource) {
+          context.drawImage(
+            mountedSource,
+            0,
+            0,
+            Math.max(1, mountedSource.width),
+            Math.max(1, mountedSource.height),
+            0,
+            0,
+            previewCanvas.width,
+            previewCanvas.height
+          );
+          previewImages.push(previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY));
+          continue;
+        }
+
+        const snapshot = pageCanvasDataRef.current[page.id];
+        if (snapshot) {
+          try {
+            const fabricModule = fabricModuleRef.current ?? (await lazyImportFabric());
+            if (!fabricModuleRef.current) {
+              fabricModuleRef.current = fabricModule;
+            }
+            const tempCanvasEl = document.createElement("canvas");
+            const tempCanvas = new fabricModule.StaticCanvas(tempCanvasEl, {
+              enableRetinaScaling: false,
+              renderOnAddRemove: false
+            });
+            try {
+              tempCanvas.setDimensions({ width: baseWidth, height: PAGE_HEIGHT });
+              const parsed = JSON.parse(snapshot) as Record<string, unknown>;
+              await tempCanvas.loadFromJSON(parsed);
+              tempCanvas.requestRenderAll();
+              const source = (tempCanvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl ?? tempCanvasEl;
+              context.drawImage(
+                source,
+                0,
+                0,
+                Math.max(1, source.width),
+                Math.max(1, source.height),
+                0,
+                0,
+                previewCanvas.width,
+                previewCanvas.height
+              );
+            } finally {
+              tempCanvas.dispose();
+            }
+          } catch {
+            // Keep white page when snapshot cannot be rendered.
+          }
+        }
+        previewImages.push(previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY));
+      }
+
+      return previewImages;
+    } catch {
+      return [];
+    }
+  }, [backgroundMode, getCanvasByPageId]);
+
+  const buildArchivePreviewImagesSyncFallback = useCallback((): string[] => {
+    try {
       const previewImages: string[] = [];
 
       for (let index = 0; index < pagesRef.current.length; index += 1) {
+        const page = pagesRef.current[index];
+        const canvas = getCanvasByPageId(page.id);
+        const sourceCanvas = canvas
+          ? (canvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl
+          : null;
+        if (!canvas || !sourceCanvas) {
+          continue;
+        }
+
+        const canvasWidth = Math.max(1, canvas.getWidth());
+        const previewHeight = Math.max(1, Math.round((PAGE_HEIGHT / canvasWidth) * ARCHIVE_PREVIEW_WIDTH));
         const previewCanvas = document.createElement("canvas");
         previewCanvas.width = ARCHIVE_PREVIEW_WIDTH;
         previewCanvas.height = previewHeight;
@@ -854,13 +1102,17 @@ function App() {
             previewCanvas.width / canvasWidth
           );
         }
-
-        const sx = 0;
-        const sy = Math.max(0, Math.round(getPageTop(index) * sourceScaleY));
-        const sw = Math.max(1, Math.round(canvasWidth * sourceScaleX));
-        const sh = Math.max(1, Math.round(PAGE_HEIGHT * sourceScaleY));
-
-        context.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, previewCanvas.width, previewCanvas.height);
+        context.drawImage(
+          sourceCanvas,
+          0,
+          0,
+          Math.max(1, sourceCanvas.width),
+          Math.max(1, sourceCanvas.height),
+          0,
+          0,
+          previewCanvas.width,
+          previewCanvas.height
+        );
         previewImages.push(previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY));
       }
 
@@ -868,7 +1120,7 @@ function App() {
     } catch {
       return [];
     }
-  }, [backgroundMode]);
+  }, [backgroundMode, getCanvasByPageId]);
 
   const loadArchiveEntries = useCallback(async () => {
     setIsArchiveLoading(true);
@@ -965,7 +1217,7 @@ function App() {
   const archiveCurrentDocument = useCallback(
     async (silent: boolean) => {
       const currentDocument = buildCurrentDocumentSnapshot();
-      const previewImages = buildArchivePreviewImages();
+      const previewImages = await buildArchivePreviewImages();
       try {
         const archivedKey = await archiveBoardDocument(
           currentDocument,
@@ -989,7 +1241,7 @@ function App() {
 
   const saveAndArchiveOnExit = useCallback(() => {
     const currentDocument = buildCurrentDocumentSnapshot();
-    const previewImages = buildArchivePreviewImages();
+    const previewImages = buildArchivePreviewImagesSyncFallback();
     pendingDocumentSaveRef.current = currentDocument;
     flushPendingDocumentSaveNow();
 
@@ -1004,32 +1256,42 @@ function App() {
         }
       })
       .catch(() => undefined);
-  }, [buildArchivePreviewImages, buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
+  }, [buildArchivePreviewImagesSyncFallback, buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
 
-  const pushHistoryState = useCallback(() => {
+  const pushHistoryState = useCallback((pageId?: string | null) => {
     if (isRestoringRef.current) {
       return;
     }
-    const snapshot = snapshotCanvas();
+    const resolvedPageId = pageId ?? getCurrentPageId();
+    if (!resolvedPageId) {
+      return;
+    }
+    const snapshot = snapshotCanvasByPageId(resolvedPageId);
     if (!snapshot) {
       return;
     }
 
-    const stack = undoStackRef.current;
-    if (stack[stack.length - 1] === snapshot) {
+    const pageHistory = historyStacksRef.current[resolvedPageId] ?? { undo: [], redo: [] };
+    if (pageHistory.undo[pageHistory.undo.length - 1] === snapshot) {
       return;
     }
 
-    stack.push(snapshot);
-    if (stack.length > MAX_HISTORY) {
-      stack.shift();
+    pageHistory.undo.push(snapshot);
+    if (pageHistory.undo.length > MAX_HISTORY) {
+      pageHistory.undo.shift();
     }
-    redoStackRef.current = [];
-    persistCurrentDocument();
-  }, [persistCurrentDocument, snapshotCanvas]);
+    pageHistory.redo = [];
+    historyStacksRef.current[resolvedPageId] = pageHistory;
+
+    const nextPageCanvasData = {
+      ...pageCanvasDataRef.current,
+      [resolvedPageId]: snapshot
+    };
+    persistDocument(pagesRef.current, nextPageCanvasData);
+  }, [getCurrentPageId, persistDocument, snapshotCanvasByPageId]);
 
   const handlePathCreated = useCallback(
-    (event: unknown) => {
+    (pageId: string, event: unknown) => {
       const path = (
         event as {
           path?: {
@@ -1055,19 +1317,21 @@ function App() {
           });
         }
       }
-      fabricCanvasRef.current?.requestRenderAll();
-      pushHistoryState();
+      const pageCanvas = getCanvasByPageId(pageId);
+      pageCanvas?.requestRenderAll();
+      pushHistoryState(pageId);
 
       if (activeToolRef.current === "pen" && path?.getBoundingRect && isOcrEnabledRef.current) {
         const rect = path.getBoundingRect({ absolute: true, stroke: true });
-        scheduleAutoOcrForRectRef.current(rect);
+        scheduleAutoOcrForRectRef.current(pageId, rect);
       }
     },
-    [pushHistoryState]
+    [getCanvasByPageId, pushHistoryState]
   );
 
-  const detachToolHandlers = useCallback(() => {
-    const canvas = fabricCanvasRef.current;
+  const detachToolHandlers = useCallback((pageId?: string | null) => {
+    const resolvedPageId = pageId ?? activeCanvasPageIdRef.current;
+    const canvas = getCanvasByPageId(resolvedPageId);
     if (!canvas) {
       return;
     }
@@ -1102,22 +1366,48 @@ function App() {
     if (handlers.up) {
       canvas.off("mouse:up", handlers.up);
     }
+    if (handlers.leave) {
+      canvas.off("mouse:out", handlers.leave);
+    }
+    handlers.cleanup?.();
+    setCanvasPanObjectInteractivity(canvas, false);
     toolHandlersRef.current = {};
-  }, []);
+  }, [getCanvasByPageId, setCanvasPanObjectInteractivity]);
 
   const configureActiveTool = useCallback(() => {
-    const canvas = fabricCanvasRef.current;
+    const pageId = getCurrentPageId();
+    const canvas = getCanvasByPageId(pageId);
     const fabricModule = fabricModuleRef.current;
     const container = containerRef.current;
-    if (!canvas) {
+    if (!canvas || !pageId) {
       return;
     }
     container?.classList.remove("is-panning");
+
+    if (activeCanvasPageIdRef.current && activeCanvasPageIdRef.current !== pageId) {
+      detachToolHandlers(activeCanvasPageIdRef.current);
+    }
+    detachToolHandlers(pageId);
+    activeCanvasPageIdRef.current = pageId;
+    for (const mappedCanvas of fabricCanvasMapRef.current.values()) {
+      if (mappedCanvas === canvas) {
+        continue;
+      }
+      mappedCanvas.isDrawingMode = false;
+      mappedCanvas.selection = false;
+      (mappedCanvas as unknown as { skipTargetFind?: boolean }).skipTargetFind = true;
+      setCanvasPanObjectInteractivity(mappedCanvas, false);
+      const mappedTopContext = (mappedCanvas as unknown as { contextTop?: CanvasRenderingContext2D }).contextTop;
+      if (mappedTopContext) {
+        mappedTopContext.globalCompositeOperation = "source-over";
+      }
+    }
     syncCanvasOffset();
     activeToolRef.current = tool;
 
-    detachToolHandlers();
     activeLineRef.current = null;
+    (canvas as unknown as { skipTargetFind?: boolean }).skipTargetFind = true;
+    setCanvasPanObjectInteractivity(canvas, false);
 
     if (tool === "pen") {
       canvas.isDrawingMode = true;
@@ -1126,7 +1416,7 @@ function App() {
       if (topContext) {
         topContext.globalCompositeOperation = "source-over";
       }
-      applyBrushSettings();
+      applyBrushSettings(canvas);
       return;
     }
 
@@ -1179,9 +1469,24 @@ function App() {
       let startY = 0;
       let startScrollLeft = 0;
       let startScrollTop = 0;
+      const stopPanning = () => {
+        if (!isPanning) {
+          container?.classList.remove("is-panning");
+          return;
+        }
+        isPanning = false;
+        container?.classList.remove("is-panning");
+      };
+
+      (canvas as unknown as { skipTargetFind?: boolean }).skipTargetFind = false;
+      canvas.selection = false;
+      setCanvasPanObjectInteractivity(canvas, true);
 
       const down = (event: unknown) => {
-        const opt = event as { e: Event };
+        const opt = event as { e: Event; target?: unknown };
+        if (opt.target) {
+          return;
+        }
         const rawEvent = opt.e;
         if (rawEvent instanceof MouseEvent && rawEvent.button !== 0) {
           return;
@@ -1217,14 +1522,36 @@ function App() {
       };
 
       const up = () => {
-        isPanning = false;
-        container?.classList.remove("is-panning");
+        stopPanning();
       };
+      const leave = () => {
+        stopPanning();
+      };
+      const onWindowPointerUp = () => {
+        stopPanning();
+      };
+      const onWindowBlur = () => {
+        stopPanning();
+      };
+
+      window.addEventListener("pointerup", onWindowPointerUp, { passive: true });
+      window.addEventListener("blur", onWindowBlur);
 
       canvas.on("mouse:down", down);
       canvas.on("mouse:move", move);
       canvas.on("mouse:up", up);
-      toolHandlersRef.current = { down, move, up };
+      canvas.on("mouse:out", leave);
+      toolHandlersRef.current = {
+        down,
+        move,
+        up,
+        leave,
+        cleanup: () => {
+          window.removeEventListener("pointerup", onWindowPointerUp);
+          window.removeEventListener("blur", onWindowBlur);
+          stopPanning();
+        }
+      };
       return;
     }
 
@@ -1262,39 +1589,35 @@ function App() {
         return;
       }
       activeLineRef.current = null;
-      pushHistoryState();
+      pushHistoryState(pageId);
     };
 
     canvas.on("mouse:down", down);
     canvas.on("mouse:move", move);
     canvas.on("mouse:up", up);
     toolHandlersRef.current = { down, move, up };
-  }, [applyBrushSettings, color, detachToolHandlers, eraserStrokeWidth, penStrokeWidth, pushHistoryState, syncCanvasOffset, tool]);
+  }, [applyBrushSettings, color, detachToolHandlers, eraserStrokeWidth, getCanvasByPageId, getCurrentPageId, penStrokeWidth, pushHistoryState, setCanvasPanObjectInteractivity, syncCanvasOffset, tool]);
 
-  const resizeCanvas = useCallback(() => {
-    const canvas = fabricCanvasRef.current;
+  const resizeCanvases = useCallback(() => {
     const container = containerRef.current;
-    const selectionCanvas = selectionCanvasRef.current;
-    const wrapper = wrapperRef.current;
-
-    if (!canvas || !container || !selectionCanvas || !wrapper) {
+    if (!container) {
       return;
     }
 
     const width = Math.max(1, Math.floor(container.clientWidth));
-    const documentHeight = getDocumentHeight(pagesRef.current.length);
+    for (const [slotId, canvas] of fabricCanvasMapRef.current.entries()) {
+      canvas.setDimensions({ width, height: PAGE_HEIGHT });
+      canvas.calcOffset();
+      canvas.requestRenderAll();
 
-    canvas.setDimensions({ width, height: documentHeight });
-    canvas.calcOffset();
-
-    selectionCanvas.width = width;
-    selectionCanvas.height = documentHeight;
-    selectionCanvas.style.width = `${width}px`;
-    selectionCanvas.style.height = `${documentHeight}px`;
-
-    wrapper.style.height = `${documentHeight}px`;
-    wrapper.style.width = `${width}px`;
-    canvas.requestRenderAll();
+      const selectionCanvas = selectionCanvasElementsRef.current.get(slotId);
+      if (selectionCanvas) {
+        selectionCanvas.width = width;
+        selectionCanvas.height = PAGE_HEIGHT;
+        selectionCanvas.style.width = `${width}px`;
+        selectionCanvas.style.height = `${PAGE_HEIGHT}px`;
+      }
+    }
   }, []);
 
   const getWorker = useCallback(async (): Promise<OcrWorker> => {
@@ -1336,39 +1659,81 @@ function App() {
     });
   }, []);
 
+  const setCurrentPageFromIndex = useCallback((index: number) => {
+    const clampedIndex = clamp(index, 0, Math.max(0, pagesRef.current.length - 1));
+    if (clampedIndex === currentPageIndexRef.current) {
+      return;
+    }
+    currentPageIndexRef.current = clampedIndex;
+    setCurrentPageIndex(clampedIndex);
+  }, []);
+
   const addPage = useCallback(async () => {
     persistCurrentDocument();
-    const nextPages = [...pagesRef.current, createPage(pagesRef.current.length)];
-    persistDocument(nextPages, canvasDataRef.current);
-    resizeCanvas();
-  }, [persistCurrentDocument, persistDocument, resizeCanvas]);
+    const nextPage = createPage(pagesRef.current.length);
+    const nextPages = [...pagesRef.current, nextPage];
+    const nextPageCanvasData = {
+      ...pageCanvasDataRef.current,
+      [nextPage.id]: null
+    };
+    persistDocument(nextPages, nextPageCanvasData);
+    historyStacksRef.current[nextPage.id] = { undo: [], redo: [] };
+    resizeCanvases();
+  }, [persistCurrentDocument, persistDocument, resizeCanvases]);
 
   const clearAllPages = useCallback(async () => {
     if (!window.confirm("Vuoi cancellare tutte le pagine?")) {
       return;
     }
 
-    const initialPages = [createPage(0)];
-    persistDocument(initialPages, null);
+    const firstPage = createPage(0);
+    const emptyPageCanvasData: PageCanvasDataMap = { [firstPage.id]: null };
+    const nextDocument: PersistedDocument = {
+      pages: [firstPage],
+      canvasData: null,
+      pageCanvasData: emptyPageCanvasData,
+      journalEntries: journalEntriesRef.current
+    };
+    await applyPersistedDocument(nextDocument);
+    persistDocument(nextDocument.pages, emptyPageCanvasData);
     lastOcrChunkRef.current = "";
     autoOcrRectRef.current = null;
     clearAutoOcrScheduleRef.current();
     currentPageIndexRef.current = 0;
     setCurrentPageIndex(0);
-    await loadCanvasData(null);
-    resetHistory();
+    historyStacksRef.current = {};
     containerRef.current?.scrollTo({ top: 0, behavior: "auto" });
-  }, [loadCanvasData, persistDocument, resetHistory]);
+  }, [applyPersistedDocument, persistDocument]);
 
   const createNewDocument = useCallback(async () => {
     if (!window.confirm("Creare un nuovo documento vuoto?")) {
       return;
     }
 
+    // Archivia sempre il documento corrente (come archiveAndCreateNew)
+    const currentDocument = buildCurrentDocumentSnapshot();
+    const previewImages = await buildArchivePreviewImages();
+    try {
+      const archivedKey = await archiveBoardDocument(
+        currentDocument,
+        activeArchiveDocumentIdRef.current,
+        previewImages
+      );
+      if (archivedKey) {
+        setActiveArchiveDocumentId(archivedKey);
+      }
+    } catch {
+      // Continua anche se l'archiviazione fallisce
+    }
+
     const emptyDocument: PersistedDocument = {
       pages: [createPage(0)],
       canvasData: null,
+      pageCanvasData: {},
       journalEntries: createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES)
+    };
+    emptyDocument.pageCanvasData = {
+      [emptyDocument.pages[0].id]: null
     };
 
     await applyPersistedDocument(emptyDocument);
@@ -1376,12 +1741,12 @@ function App() {
     pendingDocumentSaveRef.current = emptyDocument;
     flushPendingDocumentSaveNow();
     setIsArchiveOpen(false);
-    setArchiveMessage("");
-  }, [applyPersistedDocument, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
+    setArchiveMessage("Nuovo documento creato");
+  }, [applyPersistedDocument, buildArchivePreviewImages, buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
 
   const archiveAndCreateNew = useCallback(async () => {
     const currentDocument = buildCurrentDocumentSnapshot();
-    const previewImages = buildArchivePreviewImages();
+    const previewImages = await buildArchivePreviewImages();
     try {
       // Archive current document
       const archivedKey = await archiveBoardDocument(
@@ -1397,7 +1762,11 @@ function App() {
       const emptyDocument: PersistedDocument = {
         pages: [createPage(0)],
         canvasData: null,
+        pageCanvasData: {},
         journalEntries: createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES)
+      };
+      emptyDocument.pageCanvasData = {
+        [emptyDocument.pages[0].id]: null
       };
 
       await applyPersistedDocument(emptyDocument);
@@ -1443,16 +1812,87 @@ function App() {
     [buildJournalExportPayload]
   );
 
-  const buildPdfBlob = useCallback(async (): Promise<Blob | null> => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas) {
-      return null;
-    }
-    const sourceCanvas = (canvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl;
-    if (!sourceCanvas) {
-      return null;
-    }
+  const renderPageToFlattenedCanvas = useCallback(
+    async (pageId: string, width: number, height: number, gridMultiplier: number): Promise<HTMLCanvasElement | null> => {
+      const flattenedCanvas = document.createElement("canvas");
+      flattenedCanvas.width = Math.max(1, Math.round(width));
+      flattenedCanvas.height = Math.max(1, Math.round(height));
+      const flattenedContext = flattenedCanvas.getContext("2d");
+      if (!flattenedContext) {
+        return null;
+      }
 
+      flattenedContext.fillStyle = "#ffffff";
+      flattenedContext.fillRect(0, 0, flattenedCanvas.width, flattenedCanvas.height);
+      if (backgroundMode === "grid") {
+        drawGridBackground(flattenedContext, flattenedCanvas.width, flattenedCanvas.height, gridMultiplier);
+      }
+
+      const mountedCanvas = getCanvasByPageId(pageId);
+      const mountedSource = mountedCanvas
+        ? (mountedCanvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl
+        : null;
+      if (mountedSource) {
+        flattenedContext.drawImage(
+          mountedSource,
+          0,
+          0,
+          Math.max(1, mountedSource.width),
+          Math.max(1, mountedSource.height),
+          0,
+          0,
+          flattenedCanvas.width,
+          flattenedCanvas.height
+        );
+        return flattenedCanvas;
+      }
+
+      const snapshot = pageCanvasDataRef.current[pageId];
+      if (!snapshot) {
+        return flattenedCanvas;
+      }
+
+      try {
+        const fabricModule = fabricModuleRef.current ?? (await lazyImportFabric());
+        if (!fabricModuleRef.current) {
+          fabricModuleRef.current = fabricModule;
+        }
+        const tempCanvasEl = document.createElement("canvas");
+        const tempCanvas = new fabricModule.StaticCanvas(tempCanvasEl, {
+          enableRetinaScaling: false,
+          renderOnAddRemove: false
+        });
+        try {
+          const baseWidth = Math.max(1, Math.floor(containerRef.current?.clientWidth ?? width));
+          tempCanvas.setDimensions({ width: baseWidth, height: PAGE_HEIGHT });
+          const parsed = JSON.parse(snapshot) as Record<string, unknown>;
+          await tempCanvas.loadFromJSON(parsed);
+          tempCanvas.requestRenderAll();
+          const source = (tempCanvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl ?? tempCanvasEl;
+          flattenedContext.drawImage(
+            source,
+            0,
+            0,
+            Math.max(1, source.width),
+            Math.max(1, source.height),
+            0,
+            0,
+            flattenedCanvas.width,
+            flattenedCanvas.height
+          );
+        } finally {
+          tempCanvas.dispose();
+        }
+      } catch {
+        // Keep white page when snapshot cannot be rendered.
+      }
+
+      return flattenedCanvas;
+    },
+    [backgroundMode, getCanvasByPageId]
+  );
+
+  const buildPdfBlob = useCallback(async (): Promise<Blob | null> => {
     persistCurrentDocument();
 
     const pagesSnapshot = pagesRef.current;
@@ -1462,59 +1902,41 @@ function App() {
 
     const { jsPDF } = await lazyImportJsPDF();
     const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
-    const canvasWidth = Math.max(1, canvas.getWidth());
-    const canvasHeight = Math.max(1, canvas.getHeight());
-    const sourceScaleX = sourceCanvas.width / canvasWidth;
-    const sourceScaleY = sourceCanvas.height / canvasHeight;
+    let hasAtLeastOnePage = false;
 
     for (let i = 0; i < pagesSnapshot.length; i += 1) {
-      const flattenedCanvas = document.createElement("canvas");
-      flattenedCanvas.width = Math.max(1, Math.round(canvasWidth * PDF_EXPORT_MULTIPLIER));
-      flattenedCanvas.height = Math.max(1, Math.round(PAGE_HEIGHT * PDF_EXPORT_MULTIPLIER));
-      const flattenedContext = flattenedCanvas.getContext("2d");
-      if (!flattenedContext) {
+      const page = pagesSnapshot[i];
+      const baseWidth = Math.max(1, Math.floor(containerRef.current?.clientWidth ?? 1200));
+      const flattenedCanvas = await renderPageToFlattenedCanvas(
+        page.id,
+        baseWidth * PDF_EXPORT_MULTIPLIER,
+        PAGE_HEIGHT * PDF_EXPORT_MULTIPLIER,
+        PDF_EXPORT_MULTIPLIER
+      );
+      if (!flattenedCanvas) {
         continue;
       }
-      flattenedContext.fillStyle = "#ffffff";
-      flattenedContext.fillRect(0, 0, flattenedCanvas.width, flattenedCanvas.height);
-      if (backgroundMode === "grid") {
-        drawGridBackground(flattenedContext, flattenedCanvas.width, flattenedCanvas.height, PDF_EXPORT_MULTIPLIER);
-      }
-      const sourceTop = getPageTop(i);
-      const sx = 0;
-      const sy = Math.max(0, Math.round(sourceTop * sourceScaleY));
-      const sw = Math.max(1, Math.round(canvasWidth * sourceScaleX));
-      const sh = Math.max(
-        1,
-        Math.min(Math.round(PAGE_HEIGHT * sourceScaleY), Math.max(1, sourceCanvas.height - sy))
-      );
-      flattenedContext.drawImage(
-        sourceCanvas,
-        sx,
-        sy,
-        sw,
-        sh,
-        0,
-        0,
-        flattenedCanvas.width,
-        flattenedCanvas.height
-      );
 
       const image = flattenedCanvas.toDataURL("image/jpeg", PDF_EXPORT_JPEG_QUALITY);
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
-      const ratio = canvasWidth / PAGE_HEIGHT;
+      const ratio = Math.max(1, flattenedCanvas.width) / Math.max(1, flattenedCanvas.height);
       const drawWidth = pageWidth - 30;
       const drawHeight = drawWidth / ratio;
       const y = Math.max(15, (pageHeight - drawHeight) / 2);
 
-      if (i > 0) {
+      if (hasAtLeastOnePage) {
         doc.addPage();
       }
       doc.addImage(image, "JPEG", 15, y, drawWidth, drawHeight, undefined, "MEDIUM");
+      hasAtLeastOnePage = true;
+    }
+
+    if (!hasAtLeastOnePage) {
+      return null;
     }
     return doc.output("blob");
-  }, [backgroundMode, persistCurrentDocument]);
+  }, [persistCurrentDocument, renderPageToFlattenedCanvas]);
 
   const exportPdf = useCallback(async () => {
     const pdfBlob = await buildPdfBlob();
@@ -1529,37 +1951,57 @@ function App() {
   }, [buildPdfBlob, downloadBlob]);
 
   const undo = useCallback(async () => {
-    const undoStack = undoStackRef.current;
-    if (undoStack.length <= 1) {
+    const pageId = getCurrentPageId();
+    if (!pageId) {
+      return;
+    }
+    const pageHistory = historyStacksRef.current[pageId];
+    if (!pageHistory || pageHistory.undo.length <= 1) {
       return;
     }
 
-    const currentState = undoStack.pop();
+    const currentState = pageHistory.undo.pop();
     if (!currentState) {
       return;
     }
 
-    redoStackRef.current.push(currentState);
-    const previousState = undoStack[undoStack.length - 1];
+    pageHistory.redo.push(currentState);
+    const previousState = pageHistory.undo[pageHistory.undo.length - 1];
     if (!previousState) {
       return;
     }
 
-    await loadCanvasData(previousState);
-    persistCurrentDocument();
-  }, [loadCanvasData, persistCurrentDocument]);
+    historyStacksRef.current[pageId] = pageHistory;
+    await loadCanvasDataForPage(pageId, previousState);
+    persistDocument(pagesRef.current, {
+      ...pageCanvasDataRef.current,
+      [pageId]: previousState
+    });
+  }, [getCurrentPageId, loadCanvasDataForPage, persistDocument]);
 
   const redo = useCallback(async () => {
-    const redoStack = redoStackRef.current;
-    const nextState = redoStack.pop();
+    const pageId = getCurrentPageId();
+    if (!pageId) {
+      return;
+    }
+    const pageHistory = historyStacksRef.current[pageId];
+    if (!pageHistory) {
+      return;
+    }
+
+    const nextState = pageHistory.redo.pop();
     if (!nextState) {
       return;
     }
 
-    undoStackRef.current.push(nextState);
-    await loadCanvasData(nextState);
-    persistCurrentDocument();
-  }, [loadCanvasData, persistCurrentDocument]);
+    pageHistory.undo.push(nextState);
+    historyStacksRef.current[pageId] = pageHistory;
+    await loadCanvasDataForPage(pageId, nextState);
+    persistDocument(pagesRef.current, {
+      ...pageCanvasDataRef.current,
+      [pageId]: nextState
+    });
+  }, [getCurrentPageId, loadCanvasDataForPage, persistDocument]);
 
   const addJournalEntry = useCallback(() => {
     setJournalEntries((previous) => {
@@ -1567,7 +2009,18 @@ function App() {
         window.alert(`Hai raggiunto il limite massimo di ${MAX_JOURNAL_ENTRIES} righe compilabili.`);
         return previous;
       }
-      return [...previous, createJournalEntry()];
+      
+      const newEntry = createJournalEntry();
+      
+      // Copia data dalla riga precedente, o usa data di oggi per la prima riga
+      if (previous.length === 0) {
+        newEntry.date = new Date().toISOString().split('T')[0];
+      } else {
+        const lastEntry = previous[previous.length - 1];
+        newEntry.date = lastEntry.date;
+      }
+      
+      return [...previous, newEntry];
     });
   }, []);
 
@@ -1591,8 +2044,8 @@ function App() {
   }, []);
 
   const updateJournalEntry = useCallback((entryId: string, patch: Partial<JournalEntry>) => {
-    setJournalEntries((previous) =>
-      previous.map((entry) => {
+    setJournalEntries((previous) => {
+      const updated = previous.map((entry) => {
         if (entry.id !== entryId) {
           return entry;
         }
@@ -1600,8 +2053,25 @@ function App() {
           ...entry,
           ...patch
         };
-      })
-    );
+      });
+
+      // Se la data è stata aggiornata O se è stata attivata la linea di chiusura, 
+      // copia alla riga successiva se vuota
+      if (patch.date || patch.closeLine) {
+        const currentIndex = updated.findIndex(entry => entry.id === entryId);
+        const nextIndex = currentIndex + 1;
+        
+        if (nextIndex < updated.length && !updated[nextIndex].date) {
+          const currentEntry = updated[currentIndex];
+          updated[nextIndex] = {
+            ...updated[nextIndex],
+            date: currentEntry.date
+          };
+        }
+      }
+
+      return updated;
+    });
   }, []);
 
   const extractJournalData = useCallback(async () => {
@@ -1708,6 +2178,123 @@ function App() {
     await solveDisplayExpression(display);
   }, [display, solveDisplayExpression]);
 
+  const cloneCanvasObject = useCallback(async (source: unknown): Promise<unknown | null> => {
+    if (!source || typeof source !== "object") {
+      return null;
+    }
+    const cloneFn = (source as { clone?: () => Promise<unknown> }).clone;
+    if (typeof cloneFn !== "function") {
+      return null;
+    }
+    try {
+      return await cloneFn.call(source);
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const copyCanvasSelection = useCallback(async () => {
+    const canvas = getActiveCanvas();
+    const pageId = getCurrentPageId();
+    if (!canvas || !pageId) {
+      return;
+    }
+
+    const canvasApi = canvas as unknown as {
+      getActiveObject?: () => unknown;
+    };
+    const activeObject = canvasApi.getActiveObject?.() ?? null;
+    if (!activeObject) {
+      setOcrStatus("Seleziona un oggetto da copiare");
+      return;
+    }
+
+    const clonedObject = await cloneCanvasObject(activeObject);
+    if (!clonedObject) {
+      return;
+    }
+    clipboardObjectRef.current = clonedObject;
+    clipboardSourcePageIdRef.current = pageId;
+    setOcrStatus("Oggetto copiato");
+  }, [cloneCanvasObject, getActiveCanvas, getCurrentPageId]);
+
+  const pasteCanvasSelection = useCallback(async () => {
+    const source = clipboardObjectRef.current;
+    if (!source) {
+      return;
+    }
+    const pageId = getCurrentPageId();
+    const canvas = getCanvasByPageId(pageId);
+    if (!canvas || !pageId) {
+      return;
+    }
+
+    const clonedObject = await cloneCanvasObject(source);
+    if (!clonedObject) {
+      return;
+    }
+
+    const canvasApi = canvas as unknown as {
+      add?: (object: unknown) => void;
+      setActiveObject?: (object: unknown) => void;
+      discardActiveObject?: () => void;
+    };
+
+    const offsetObject = (object: unknown) => {
+      const objApi = object as {
+        left?: number;
+        top?: number;
+        set?: (props: Record<string, unknown>) => void;
+        setCoords?: () => void;
+      };
+      objApi.set?.({
+        left: (typeof objApi.left === "number" ? objApi.left : 0) + COPY_PASTE_OFFSET,
+        top: (typeof objApi.top === "number" ? objApi.top : 0) + COPY_PASTE_OFFSET,
+        evented: true,
+        selectable: true
+      });
+      objApi.setCoords?.();
+    };
+
+    canvasApi.discardActiveObject?.();
+    const clonedApi = clonedObject as {
+      type?: string;
+      canvas?: unknown;
+      forEachObject?: (callback: (object: unknown) => void) => void;
+    };
+
+    if (clonedApi.type === "activeSelection" && typeof clonedApi.forEachObject === "function") {
+      clonedApi.canvas = canvas;
+      const pastedObjects: unknown[] = [];
+      clonedApi.forEachObject((object) => {
+        offsetObject(object);
+        canvasApi.add?.(object);
+        pastedObjects.push(object);
+      });
+
+      if (pastedObjects.length > 1) {
+        const fabricModule = fabricModuleRef.current ?? (await lazyImportFabric());
+        if (!fabricModuleRef.current) {
+          fabricModuleRef.current = fabricModule;
+        }
+        const selection = new fabricModule.ActiveSelection(pastedObjects as never[], { canvas });
+        canvasApi.setActiveObject?.(selection);
+      } else if (pastedObjects.length === 1) {
+        canvasApi.setActiveObject?.(pastedObjects[0]);
+      }
+    } else {
+      offsetObject(clonedObject);
+      canvasApi.add?.(clonedObject);
+      canvasApi.setActiveObject?.(clonedObject);
+    }
+
+    clipboardObjectRef.current = clonedObject;
+    clipboardSourcePageIdRef.current = pageId;
+    canvas.requestRenderAll();
+    pushHistoryState(pageId);
+    setOcrStatus("Oggetto incollato");
+  }, [cloneCanvasObject, getCanvasByPageId, getCurrentPageId, pushHistoryState]);
+
   const handlePenClick = useCallback(() => {
     if (suppressToolClickRef.current) {
       suppressToolClickRef.current = false;
@@ -1758,13 +2345,17 @@ function App() {
   clearAutoOcrScheduleRef.current = clearAutoOcrSchedule;
 
   const runAutoOcrFromPendingRect = useCallback(async () => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas || !isOcrEnabledRef.current || isSelectionMode || isAutoOcrBusyRef.current) {
+    const pendingRect = autoOcrRectRef.current;
+    if (!pendingRect || !isOcrEnabledRef.current || isSelectionMode || isAutoOcrBusyRef.current) {
+      return;
+    }
+    if (pendingRect.rect.width < 8 || pendingRect.rect.height < 8) {
+      autoOcrRectRef.current = null;
       return;
     }
 
-    const rect = autoOcrRectRef.current;
-    if (!rect || rect.width < 8 || rect.height < 8) {
+    const canvas = getCanvasByPageId(pendingRect.pageId);
+    if (!canvas) {
       return;
     }
     autoOcrRectRef.current = null;
@@ -1773,6 +2364,7 @@ function App() {
     setOcrStatus("OCR automatico...");
 
     try {
+      const rect = pendingRect.rect;
       const imageData = canvas.toDataURL({
         format: "png",
         left: rect.left,
@@ -1823,11 +2415,11 @@ function App() {
         }, AUTO_OCR_DEBOUNCE_MS);
       }
     }
-  }, [getWorker, isSelectionMode, solveDisplayExpression]);
+  }, [getCanvasByPageId, getWorker, isSelectionMode, solveDisplayExpression]);
 
   const scheduleAutoOcrForRect = useCallback(
-    (rect: SelectionRect) => {
-      const canvas = fabricCanvasRef.current;
+    (pageId: string, rect: SelectionRect) => {
+      const canvas = getCanvasByPageId(pageId);
       if (!canvas || !isOcrEnabledRef.current) {
         return;
       }
@@ -1846,16 +2438,21 @@ function App() {
       };
 
       const previousRect = autoOcrRectRef.current;
-      autoOcrRectRef.current = previousRect
+      autoOcrRectRef.current = previousRect && previousRect.pageId === pageId
         ? {
-            left: Math.min(previousRect.left, normalizedRect.left),
-            top: Math.min(previousRect.top, normalizedRect.top),
-            width: Math.max(previousRect.left + previousRect.width, normalizedRect.left + normalizedRect.width) -
-              Math.min(previousRect.left, normalizedRect.left),
-            height: Math.max(previousRect.top + previousRect.height, normalizedRect.top + normalizedRect.height) -
-              Math.min(previousRect.top, normalizedRect.top)
+            pageId,
+            rect: {
+              left: Math.min(previousRect.rect.left, normalizedRect.left),
+              top: Math.min(previousRect.rect.top, normalizedRect.top),
+              width:
+                Math.max(previousRect.rect.left + previousRect.rect.width, normalizedRect.left + normalizedRect.width) -
+                Math.min(previousRect.rect.left, normalizedRect.left),
+              height:
+                Math.max(previousRect.rect.top + previousRect.rect.height, normalizedRect.top + normalizedRect.height) -
+                Math.min(previousRect.rect.top, normalizedRect.top)
+            }
           }
-        : normalizedRect;
+        : { pageId, rect: normalizedRect };
 
       clearAutoOcrSchedule();
       autoOcrTimeoutRef.current = window.setTimeout(() => {
@@ -1863,13 +2460,13 @@ function App() {
         void runAutoOcrFromPendingRect();
       }, AUTO_OCR_DEBOUNCE_MS);
     },
-    [clearAutoOcrSchedule, runAutoOcrFromPendingRect]
+    [clearAutoOcrSchedule, getCanvasByPageId, runAutoOcrFromPendingRect]
   );
   scheduleAutoOcrForRectRef.current = scheduleAutoOcrForRect;
 
   const runOcrForRect = useCallback(
-    async (rect: SelectionRect) => {
-      const canvas = fabricCanvasRef.current;
+    async (pageId: string, rect: SelectionRect) => {
+      const canvas = getCanvasByPageId(pageId);
       if (!canvas || !isOcrEnabledRef.current || rect.width < 6 || rect.height < 6) {
         return;
       }
@@ -1907,36 +2504,167 @@ function App() {
       } catch {
         setOcrStatus("OCR fallito");
       } finally {
-        clearSelectionOverlay();
+        clearSelectionOverlay(pageId);
         selectionDragRef.current.active = false;
+        selectionDragRef.current.pageId = null;
         setIsSelectionMode(false);
         setIsOcrRunning(false);
       }
     },
-    [clearSelectionOverlay, getWorker, solveDisplayExpression]
+    [clearSelectionOverlay, getCanvasByPageId, getWorker, solveDisplayExpression]
   );
 
+  // Funzioni per la selezione multipla di oggetti
+  const getObjectsInRect = useCallback((pageId: string, rect: SelectionRect): FabricObject[] => {
+    const canvas = getCanvasByPageId(pageId);
+    if (!canvas) return [];
+
+    const objects = canvas.getObjects();
+    const objectsInRect: FabricObject[] = [];
+
+    for (const obj of objects) {
+      const bounds = obj.getBoundingRect();
+      if (
+        bounds.left < rect.left + rect.width &&
+        bounds.left + bounds.width > rect.left &&
+        bounds.top < rect.top + rect.height &&
+        bounds.top + bounds.height > rect.top
+      ) {
+        objectsInRect.push(obj);
+      }
+    }
+
+    return objectsInRect;
+  }, [getCanvasByPageId]);
+
+  const selectObjectsInRect = useCallback((pageId: string, rect: SelectionRect) => {
+    const canvas = getCanvasByPageId(pageId);
+    if (!canvas) return;
+
+    const objectsInRect = getObjectsInRect(pageId, rect);
+    
+    // Pulisci selezione precedente
+    selectedObjectsRef.current.clear();
+    canvas.discardActiveObject();
+
+    if (objectsInRect.length > 0) {
+      // Crea un gruppo di selezione
+      const fabricModule = fabricModuleRef.current;
+      if (fabricModule) {
+        const selection = new fabricModule.ActiveSelection(objectsInRect, {
+          canvas: canvas
+        });
+        canvas.setActiveObject(selection);
+        
+        // Salva i riferimenti agli oggetti selezionati (usiamo un hash univoco)
+        objectsInRect.forEach(obj => {
+          const objHash = `${obj.left}_${obj.top}_${obj.width}_${obj.height}`;
+          selectedObjectsRef.current.add(objHash);
+        });
+      }
+    }
+
+    canvas.renderAll();
+  }, [getCanvasByPageId, getObjectsInRect]);
+
+  const drawMultiSelectionRect = useCallback((pageId: string) => {
+    const selectionCanvas = getSelectionCanvasByPageId(pageId);
+    if (!selectionCanvas || !multiSelectionRef.current.active) return;
+
+    const context = selectionCanvas.getContext("2d");
+    if (!context) return;
+
+    const { startPoint, currentPoint } = multiSelectionRef.current;
+    if (!startPoint || !currentPoint) return;
+
+    const left = Math.min(startPoint.x, currentPoint.x);
+    const top = Math.min(startPoint.y, currentPoint.y);
+    const width = Math.abs(currentPoint.x - startPoint.x);
+    const height = Math.abs(currentPoint.y - startPoint.y);
+
+    clearSelectionOverlay(pageId);
+    context.setLineDash([6, 5]);
+    context.lineWidth = 2;
+    context.strokeStyle = "#2563eb"; // Blu per selezione multipla
+    context.fillStyle = "rgba(37, 99, 235, 0.1)"; // Fill trasparente
+    context.fillRect(left, top, width, height);
+    context.strokeRect(left, top, width, height);
+  }, [getSelectionCanvasByPageId, clearSelectionOverlay]);
+
   const handleSelectionPointerDown = useCallback(
-    (event: React.PointerEvent<HTMLCanvasElement>) => {
+    (pageId: string, event: React.PointerEvent<HTMLCanvasElement>) => {
       if (!isSelectionMode || isOcrRunning) {
         return;
       }
-      selectionDragRef.current = {
-        active: true,
-        startX: event.nativeEvent.offsetX,
-        startY: event.nativeEvent.offsetY
-      };
-      clearSelectionOverlay();
+
+      const canvas = getCanvasByPageId(pageId);
+      if (!canvas) return;
+
+      // Controlla se si clicca su un oggetto esistente
+      const target = canvas.findTarget(event.nativeEvent);
+      
+      if (target) {
+        // Click su un oggetto: selezione singola
+        canvas.setActiveObject(target);
+        canvas.renderAll();
+        
+        // Resetta la selezione multipla
+        multiSelectionRef.current = {
+          active: false,
+          startPoint: null,
+          currentPoint: null,
+          pageId: null
+        };
+      } else {
+        // Click sul vuoto: inizia selezione area
+        multiSelectionRef.current = {
+          active: true,
+          startPoint: { x: event.nativeEvent.offsetX, y: event.nativeEvent.offsetY },
+          currentPoint: { x: event.nativeEvent.offsetX, y: event.nativeEvent.offsetY },
+          pageId
+        };
+        
+        // Disattiva la selezione corrente
+        canvas.discardActiveObject();
+        canvas.renderAll();
+      }
+
+      // Mantiene la compatibilità con OCR se abilitato
+      if (isOcrEnabledRef.current) {
+        selectionDragRef.current = {
+          active: true,
+          startX: event.nativeEvent.offsetX,
+          startY: event.nativeEvent.offsetY,
+          pageId
+        };
+        clearSelectionOverlay(pageId);
+      }
     },
-    [clearSelectionOverlay, isOcrRunning, isSelectionMode]
+    [clearSelectionOverlay, getCanvasByPageId, isOcrRunning, isSelectionMode]
   );
 
   const handleSelectionPointerMove = useCallback(
-    (event: React.PointerEvent<HTMLCanvasElement>) => {
-      if (!isSelectionMode || !selectionDragRef.current.active) {
+    (pageId: string, event: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!isSelectionMode) {
         return;
       }
-      const selectionCanvas = selectionCanvasRef.current;
+
+      // Gestione selezione multipla per area
+      if (multiSelectionRef.current.active && multiSelectionRef.current.pageId === pageId) {
+        multiSelectionRef.current.currentPoint = {
+          x: event.nativeEvent.offsetX,
+          y: event.nativeEvent.offsetY
+        };
+        drawMultiSelectionRect(pageId);
+        return;
+      }
+
+      // Gestione OCR (se abilitato)
+      if (!selectionDragRef.current.active || selectionDragRef.current.pageId !== pageId) {
+        return;
+      }
+      
+      const selectionCanvas = getSelectionCanvasByPageId(pageId);
       if (!selectionCanvas) {
         return;
       }
@@ -1952,18 +2680,62 @@ function App() {
       const width = Math.abs(endX - selectionDragRef.current.startX);
       const height = Math.abs(endY - selectionDragRef.current.startY);
 
-      clearSelectionOverlay();
+      clearSelectionOverlay(pageId);
       context.setLineDash([6, 5]);
       context.lineWidth = 2;
       context.strokeStyle = "#d92d20";
       context.strokeRect(left, top, width, height);
     },
-    [clearSelectionOverlay, isSelectionMode]
+    [clearSelectionOverlay, getSelectionCanvasByPageId, isSelectionMode, drawMultiSelectionRect]
   );
 
   const handleSelectionPointerUp = useCallback(
-    async (event: React.PointerEvent<HTMLCanvasElement>) => {
-      if (!isSelectionMode || !selectionDragRef.current.active) {
+    async (pageId: string, event: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!isSelectionMode) {
+        return;
+      }
+
+      // Gestione selezione multipla per area
+      if (multiSelectionRef.current.active && multiSelectionRef.current.pageId === pageId) {
+        const { startPoint, currentPoint } = multiSelectionRef.current;
+        if (!startPoint || !currentPoint) {
+          // Resetta lo stato
+          multiSelectionRef.current = {
+            active: false,
+            startPoint: null,
+            currentPoint: null,
+            pageId: null
+          };
+          return;
+        }
+
+        const left = Math.min(startPoint.x, currentPoint.x);
+        const top = Math.min(startPoint.y, currentPoint.y);
+        const width = Math.abs(currentPoint.x - startPoint.x);
+        const height = Math.abs(currentPoint.y - startPoint.y);
+
+        // Se l'area è sufficientemente grande, seleziona gli oggetti
+        if (width > 5 && height > 5) {
+          selectObjectsInRect(pageId, { left, top, width, height });
+          
+          // Disattiva la modalità selezione e attiva la modalità mano per spostare
+          setIsSelectionMode(false);
+          setTool("pan");
+        }
+
+        // Pulisci e resetta
+        clearSelectionOverlay(pageId);
+        multiSelectionRef.current = {
+          active: false,
+          startPoint: null,
+          currentPoint: null,
+          pageId: null
+        };
+        return;
+      }
+
+      // Gestione OCR (se abilitato)
+      if (!selectionDragRef.current.active || selectionDragRef.current.pageId !== pageId) {
         return;
       }
 
@@ -1974,51 +2746,314 @@ function App() {
       const width = Math.abs(endX - selectionDragRef.current.startX);
       const height = Math.abs(endY - selectionDragRef.current.startY);
 
-      await runOcrForRect({ left, top, width, height });
+      await runOcrForRect(pageId, { left, top, width, height });
     },
-    [isSelectionMode, runOcrForRect]
+    [isSelectionMode, runOcrForRect, selectObjectsInRect, clearSelectionOverlay]
+  );
+
+  const initializeFabricCanvasForSlot = useCallback(
+    (slotId: number, drawingCanvas: HTMLCanvasElement) => {
+      const fabricModule = fabricModuleRef.current;
+      if (!fabricModule || fabricCanvasMapRef.current.has(slotId)) {
+        return;
+      }
+
+      const canvas = new fabricModule.Canvas(drawingCanvas, {
+        isDrawingMode: false,
+        selection: false,
+        enableRetinaScaling: false
+      });
+      fabricCanvasMapRef.current.set(slotId, canvas);
+
+      const onPathCreated = (event: unknown) => {
+        const pageId = slotPageMapRef.current.get(slotId);
+        if (!pageId) {
+          return;
+        }
+        handlePathCreated(pageId, event);
+      };
+      const onObjectModified = () => {
+        const pageId = slotPageMapRef.current.get(slotId);
+        if (!pageId) {
+          return;
+        }
+        pushHistoryState(pageId);
+      };
+      const onObjectRemoved = () => {
+        const pageId = slotPageMapRef.current.get(slotId);
+        if (!pageId) {
+          return;
+        }
+        pushHistoryState(pageId);
+      };
+
+      canvas.on("path:created", onPathCreated);
+      canvas.on("object:modified", onObjectModified);
+      canvas.on("object:removed", onObjectRemoved);
+
+      const canvasWithCleanup = canvas as unknown as { __cleanup?: () => void };
+      canvasWithCleanup.__cleanup = () => {
+        canvas.off("path:created", onPathCreated);
+        canvas.off("object:modified", onObjectModified);
+        canvas.off("object:removed", onObjectRemoved);
+      };
+      const assignedPageId = slotPageMapRef.current.get(slotId);
+      if (assignedPageId) {
+        const loadToken = (slotLoadTokenRef.current[slotId] ?? 0) + 1;
+        slotLoadTokenRef.current[slotId] = loadToken;
+        void loadCanvasDataIntoCanvas(canvas, pageCanvasDataRef.current[assignedPageId] ?? null, assignedPageId).then(
+          () => {
+            if (slotLoadTokenRef.current[slotId] !== loadToken) {
+              return;
+            }
+            if (!historyStacksRef.current[assignedPageId]) {
+              resetHistoryForPage(assignedPageId);
+            }
+            if (getCurrentPageId() === assignedPageId) {
+              configureActiveTool();
+            } else {
+              canvas.isDrawingMode = false;
+              canvas.selection = false;
+            }
+          }
+        );
+      }
+      resizeCanvases();
+      setIsCanvasReady(true);
+    },
+    [configureActiveTool, getCurrentPageId, handlePathCreated, loadCanvasDataIntoCanvas, pushHistoryState, resetHistoryForPage, resizeCanvases]
+  );
+
+  const disposeFabricCanvasForSlot = useCallback((slotId: number) => {
+    const canvas = fabricCanvasMapRef.current.get(slotId);
+    if (!canvas) {
+      return;
+    }
+    const pageId = slotPageMapRef.current.get(slotId) ?? null;
+    if (pageId && activeCanvasPageIdRef.current === pageId) {
+      detachToolHandlers(pageId);
+      activeCanvasPageIdRef.current = null;
+    }
+    if (pageId) {
+      if (pageSlotMapRef.current.get(pageId) === slotId) {
+        pageSlotMapRef.current.delete(pageId);
+      }
+      if (slotPageMapRef.current.get(slotId) === pageId) {
+        slotPageMapRef.current.delete(slotId);
+      }
+    }
+    const canvasWithCleanup = canvas as unknown as { __cleanup?: () => void };
+    canvasWithCleanup.__cleanup?.();
+    canvas.dispose();
+    fabricCanvasMapRef.current.delete(slotId);
+  }, [detachToolHandlers]);
+
+  const bindDrawingCanvasRef = useCallback(
+    (slotId: number, node: HTMLCanvasElement | null) => {
+      if (node) {
+        drawingCanvasElementsRef.current.set(slotId, node);
+        initializeFabricCanvasForSlot(slotId, node);
+        return;
+      }
+      drawingCanvasElementsRef.current.delete(slotId);
+      disposeFabricCanvasForSlot(slotId);
+    },
+    [disposeFabricCanvasForSlot, initializeFabricCanvasForSlot]
+  );
+
+  const bindSelectionCanvasRef = useCallback((slotId: number, node: HTMLCanvasElement | null) => {
+    if (node) {
+      selectionCanvasElementsRef.current.set(slotId, node);
+      return;
+    }
+    selectionCanvasElementsRef.current.delete(slotId);
+  }, []);
+
+  const bindPageSentinelRef = useCallback((pageId: string, node: HTMLDivElement | null) => {
+    if (node) {
+      pageSentinelElementsRef.current.set(pageId, node);
+      return;
+    }
+    pageSentinelElementsRef.current.delete(pageId);
+  }, []);
+
+  const getDrawingCanvasRef = useCallback(
+    (slotId: number) => {
+      const existing = drawingCanvasRefCallbacksRef.current.get(slotId);
+      if (existing) {
+        return existing;
+      }
+      const callback = (node: HTMLCanvasElement | null) => {
+        bindDrawingCanvasRef(slotId, node);
+      };
+      drawingCanvasRefCallbacksRef.current.set(slotId, callback);
+      return callback;
+    },
+    [bindDrawingCanvasRef]
+  );
+
+  const getSelectionCanvasRef = useCallback(
+    (slotId: number) => {
+      const existing = selectionCanvasRefCallbacksRef.current.get(slotId);
+      if (existing) {
+        return existing;
+      }
+      const callback = (node: HTMLCanvasElement | null) => {
+        bindSelectionCanvasRef(slotId, node);
+      };
+      selectionCanvasRefCallbacksRef.current.set(slotId, callback);
+      return callback;
+    },
+    [bindSelectionCanvasRef]
+  );
+
+  const getPageSentinelRef = useCallback(
+    (pageId: string) => {
+      const existing = pageSentinelRefCallbacksRef.current.get(pageId);
+      if (existing) {
+        return existing;
+      }
+      const callback = (node: HTMLDivElement | null) => {
+        bindPageSentinelRef(pageId, node);
+      };
+      pageSentinelRefCallbacksRef.current.set(pageId, callback);
+      return callback;
+    },
+    [bindPageSentinelRef]
+  );
+
+  const assignPageToSlot = useCallback(
+    async (slotId: number, nextPageId: string | null) => {
+      const currentPageId = slotPageMapRef.current.get(slotId) ?? null;
+      const canvas = fabricCanvasMapRef.current.get(slotId) ?? null;
+
+      if (currentPageId === nextPageId) {
+        return;
+      }
+
+      if (canvas && currentPageId) {
+        const previousSnapshot = snapshotCanvasByPageId(currentPageId);
+        if (previousSnapshot !== null) {
+          pageCanvasDataRef.current = {
+            ...pageCanvasDataRef.current,
+            [currentPageId]: previousSnapshot
+          };
+        }
+      }
+
+      if (currentPageId) {
+        if (pageSlotMapRef.current.get(currentPageId) === slotId) {
+          pageSlotMapRef.current.delete(currentPageId);
+        }
+        if (slotPageMapRef.current.get(slotId) === currentPageId) {
+          slotPageMapRef.current.delete(slotId);
+        }
+      }
+
+      if (!nextPageId) {
+        if (canvas) {
+          await loadCanvasDataIntoCanvas(canvas, null, currentPageId ?? undefined);
+          canvas.isDrawingMode = false;
+          canvas.selection = false;
+        }
+        return;
+      }
+
+      const existingSlotForNextPage = pageSlotMapRef.current.get(nextPageId);
+      if (existingSlotForNextPage !== undefined && existingSlotForNextPage !== slotId) {
+        if (slotPageMapRef.current.get(existingSlotForNextPage) === nextPageId) {
+          slotPageMapRef.current.delete(existingSlotForNextPage);
+        }
+      }
+      pageSlotMapRef.current.set(nextPageId, slotId);
+      slotPageMapRef.current.set(slotId, nextPageId);
+
+      if (!canvas) {
+        return;
+      }
+
+      const loadToken = (slotLoadTokenRef.current[slotId] ?? 0) + 1;
+      slotLoadTokenRef.current[slotId] = loadToken;
+      const pageData = pageCanvasDataRef.current[nextPageId] ?? null;
+      await loadCanvasDataIntoCanvas(canvas, pageData, nextPageId);
+      if (slotLoadTokenRef.current[slotId] !== loadToken) {
+        return;
+      }
+
+      if (!historyStacksRef.current[nextPageId]) {
+        resetHistoryForPage(nextPageId);
+      }
+      if (getCurrentPageId() === nextPageId) {
+        configureActiveTool();
+      } else {
+        canvas.isDrawingMode = false;
+        canvas.selection = false;
+      }
+    },
+    [configureActiveTool, getCurrentPageId, loadCanvasDataIntoCanvas, resetHistoryForPage, snapshotCanvasByPageId]
   );
 
   useEffect(() => {
-    const drawingCanvas = drawingCanvasRef.current;
-    if (!drawingCanvas) {
-      return;
-    }
+    setSlotAssignments((previous) => {
+      const nextAssignments = Array.from({ length: CANVAS_POOL_SIZE }, () => null as string | null);
+      const remaining = new Set(renderPageIds);
 
+      for (let slotId = 0; slotId < previous.length; slotId += 1) {
+        const pageId = previous[slotId];
+        if (pageId && remaining.has(pageId)) {
+          nextAssignments[slotId] = pageId;
+          remaining.delete(pageId);
+        }
+      }
+
+      for (let slotId = 0; slotId < nextAssignments.length; slotId += 1) {
+        if (nextAssignments[slotId]) {
+          continue;
+        }
+        const iterator = remaining.values().next();
+        if (iterator.done) {
+          break;
+        }
+        nextAssignments[slotId] = iterator.value;
+        remaining.delete(iterator.value);
+      }
+
+      const unchanged =
+        previous.length === nextAssignments.length &&
+        previous.every((pageId, index) => pageId === nextAssignments[index]);
+      return unchanged ? previous : nextAssignments;
+    });
+  }, [renderPageIds]);
+
+  useEffect(() => {
+    for (let slotId = 0; slotId < CANVAS_POOL_SIZE; slotId += 1) {
+      void assignPageToSlot(slotId, slotAssignments[slotId] ?? null);
+    }
+  }, [assignPageToSlot, slotAssignments]);
+
+  useEffect(() => {
     let unmounted = false;
     let onResize: (() => void) | null = null;
-    let createdCanvas: FabricCanvas | null = null;
 
     void lazyImportFabric().then((fabricModule) => {
       if (unmounted) {
         return;
       }
       fabricModuleRef.current = fabricModule;
-
-      const canvas = new fabricModule.Canvas(drawingCanvas, {
-        isDrawingMode: true,
-        selection: false
-      });
-      createdCanvas = canvas;
-      fabricCanvasRef.current = canvas;
-      setIsCanvasReady(true);
-      applyBrushSettings();
-
-      canvas.on("path:created", handlePathCreated);
-      canvas.on("object:modified", pushHistoryState);
-      canvas.on("object:removed", pushHistoryState);
-
-      resizeCanvas();
-      syncCanvasOffset();
-      void loadCanvasData(canvasDataRef.current).then(() => {
-        resetHistory();
-      });
-
       onResize = () => {
-        resizeCanvas();
+        resizeCanvases();
         syncCanvasOffset();
       };
       window.addEventListener("resize", onResize);
+
+      for (let slotId = 0; slotId < CANVAS_POOL_SIZE; slotId += 1) {
+        const node = drawingCanvasElementsRef.current.get(slotId);
+        if (node) {
+          initializeFabricCanvasForSlot(slotId, node);
+        }
+      }
+      resizeCanvases();
+      setIsCanvasReady(fabricCanvasMapRef.current.size > 0);
     });
 
     return () => {
@@ -2027,12 +3062,15 @@ function App() {
         window.removeEventListener("resize", onResize);
       }
       detachToolHandlers();
-      createdCanvas?.dispose();
-      fabricCanvasRef.current = null;
+      for (const slotId of Array.from(fabricCanvasMapRef.current.keys())) {
+        disposeFabricCanvasForSlot(slotId);
+      }
+      pageSlotMapRef.current.clear();
+      slotPageMapRef.current.clear();
       fabricModuleRef.current = null;
       setIsCanvasReady(false);
     };
-  }, [applyBrushSettings, detachToolHandlers, handlePathCreated, loadCanvasData, pushHistoryState, resetHistory, resizeCanvas, syncCanvasOffset]);
+  }, [detachToolHandlers, disposeFabricCanvasForSlot, initializeFabricCanvasForSlot, resizeCanvases, syncCanvasOffset]);
 
   useEffect(() => {
     if (hasHydratedFromIndexedDbRef.current) {
@@ -2043,34 +3081,26 @@ function App() {
     let cancelled = false;
     void (async () => {
       try {
-        const indexedDocument = await loadLastBoardDocument();
+        const [indexedDocument, appSettings] = await Promise.all([
+          loadLastBoardDocument(),
+          loadAppSettings()
+        ]);
         if (cancelled) {
           return;
         }
+        if (appSettings) {
+          setBackgroundMode(appSettings.backgroundMode);
+          activeArchiveDocumentIdRef.current = appSettings.activeArchiveDocumentId;
+        }
+        setIsOcrEnabled(false);
         if (indexedDocument) {
           await applyPersistedDocument(indexedDocument);
           return;
         }
+        void saveLastBoardDocument(initialDocumentRef.current).catch(() => undefined);
       } catch {
-        // Keep legacy fallback silently.
+        void saveLastBoardDocument(initialDocumentRef.current).catch(() => undefined);
       }
-
-      const legacyDocument = loadLegacyDocumentFromLocalStorage();
-      if (legacyDocument) {
-        await applyPersistedDocument(legacyDocument);
-        void saveLastBoardDocument(legacyDocument)
-          .then(() => {
-            try {
-              localStorage.removeItem(LEGACY_STORAGE_KEY);
-            } catch {
-              // Ignore cleanup errors.
-            }
-          })
-          .catch(() => undefined);
-        return;
-      }
-
-      void saveLastBoardDocument(initialDocumentRef.current).catch(() => undefined);
     })();
 
     return () => {
@@ -2104,33 +3134,67 @@ function App() {
       return;
     }
     configureActiveTool();
-  }, [configureActiveTool, isCanvasReady]);
+  }, [configureActiveTool, currentPageIndex, isCanvasReady]);
 
   useEffect(() => {
     if (!isCanvasReady || tool !== "pen") {
       return;
     }
-    const canvas = fabricCanvasRef.current;
+    const canvas = getActiveCanvas();
     if (!canvas) {
       return;
     }
     syncCanvasOffset();
     canvas.isDrawingMode = true;
     canvas.selection = false;
-    applyBrushSettings();
-  }, [applyBrushSettings, isCanvasReady, penSizeLevel, color, syncCanvasOffset, tool]);
+    applyBrushSettings(canvas);
+  }, [applyBrushSettings, getActiveCanvas, isCanvasReady, penSizeLevel, color, syncCanvasOffset, tool]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tagName = target.tagName;
+        if (tagName === "INPUT" || tagName === "TEXTAREA" || target.isContentEditable) {
+          return;
+        }
+      }
+      if (!(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "c") {
+        event.preventDefault();
+        void copyCanvasSelection();
+        return;
+      }
+      if (key === "v") {
+        event.preventDefault();
+        void pasteCanvasSelection();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [copyCanvasSelection, pasteCanvasSelection]);
 
   useEffect(() => {
     if (!isCanvasReady) {
       return;
     }
-    resizeCanvas();
-  }, [isCanvasReady, pages.length, resizeCanvas]);
+    resizeCanvases();
+  }, [isCanvasReady, pages.length, resizeCanvases]);
 
   useEffect(() => {
     if (!isSelectionMode) {
       clearSelectionOverlay();
       selectionDragRef.current.active = false;
+      selectionDragRef.current.pageId = null;
     }
   }, [clearSelectionOverlay, isSelectionMode]);
 
@@ -2167,10 +3231,15 @@ function App() {
         Math.max(0, pagesRef.current.length - 1)
       );
 
-      if (index !== currentPageIndexRef.current) {
-        currentPageIndexRef.current = index;
-        setCurrentPageIndex(index);
-      }
+      setCurrentPageFromIndex(index);
+      setVirtualWindowRange(
+        computeVirtualWindowRange(
+          container.scrollTop,
+          container.clientHeight,
+          pagesRef.current.length,
+          VIRTUALIZATION_BUFFER_PAGES
+        )
+      );
 
       const nearBottom =
         container.scrollTop + container.clientHeight >=
@@ -2196,7 +3265,73 @@ function App() {
     return () => {
       container.removeEventListener("scroll", onScroll);
     };
-  }, [addPage, isCanvasReady, isOcrRunning, isSelectionMode, syncCanvasOffset]);
+  }, [addPage, isCanvasReady, isOcrRunning, isSelectionMode, setCurrentPageFromIndex, syncCanvasOffset]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+    setVirtualWindowRange(
+      computeVirtualWindowRange(
+        container.scrollTop,
+        container.clientHeight,
+        pages.length,
+        VIRTUALIZATION_BUFFER_PAGES
+      )
+    );
+  }, [pages.length]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    let hasObserver = true;
+    const visibleIds = new Set<string>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const target = entry.target as HTMLElement;
+          const pageId = target.dataset.pageId;
+          if (!pageId) {
+            continue;
+          }
+          if (entry.isIntersecting) {
+            visibleIds.add(pageId);
+          } else {
+            visibleIds.delete(pageId);
+          }
+        }
+        if (!hasObserver) {
+          return;
+        }
+        setIntersectingPageIds((previous) => {
+          const next = Array.from(visibleIds);
+          if (previous.length === next.length && previous.every((id) => visibleIds.has(id))) {
+            return previous;
+          }
+          return next;
+        });
+      },
+      {
+        root: container,
+        rootMargin: `${PAGE_HEIGHT}px 0px ${PAGE_HEIGHT}px 0px`,
+        threshold: 0.01
+      }
+    );
+
+    for (const [pageId, node] of pageSentinelElementsRef.current.entries()) {
+      node.dataset.pageId = pageId;
+      observer.observe(node);
+    }
+
+    return () => {
+      hasObserver = false;
+      observer.disconnect();
+    };
+  }, [pages]);
 
   useEffect(() => {
     if (!isCanvasReady) {
@@ -2228,7 +3363,7 @@ function App() {
       startScrollTop = container.scrollTop;
       container.classList.add("is-two-finger-panning");
 
-      const canvas = fabricCanvasRef.current;
+      const canvas = getActiveCanvas();
       if (canvas) {
         drawingModeBefore = canvas.isDrawingMode;
         canvas.isDrawingMode = false;
@@ -2247,7 +3382,7 @@ function App() {
       isTwoFingerPanning = false;
       container.classList.remove("is-two-finger-panning");
 
-      const canvas = fabricCanvasRef.current;
+      const canvas = getActiveCanvas();
       if (canvas && drawingModeBefore && activeToolRef.current === "pen") {
         canvas.isDrawingMode = true;
       }
@@ -2301,7 +3436,7 @@ function App() {
       container.removeEventListener("touchend", onTouchEnd, true);
       container.removeEventListener("touchcancel", onTouchCancel, true);
     };
-  }, [isCanvasReady]);
+  }, [getActiveCanvas, isCanvasReady]);
 
   useEffect(() => {
     return () => {
@@ -2342,24 +3477,24 @@ function App() {
 
   useEffect(() => {
     journalEntriesRef.current = journalEntries;
-    localStorage.setItem(JOURNAL_STORAGE_KEY, JSON.stringify(journalEntries));
-
+    const snapshot = buildCurrentDocumentSnapshot();
     scheduleDocumentSave({
-      pages: pagesRef.current,
-      canvasData: canvasDataRef.current,
+      ...snapshot,
       journalEntries
     });
-  }, [journalEntries, scheduleDocumentSave]);
+  }, [buildCurrentDocumentSnapshot, journalEntries, scheduleDocumentSave]);
 
   useEffect(() => {
-    localStorage.setItem(BACKGROUND_STORAGE_KEY, backgroundMode);
+    void saveAppSettings({
+      backgroundMode
+    }).catch(() => undefined);
   }, [backgroundMode]);
 
   useEffect(() => {
     isOcrEnabledRef.current = isOcrEnabled;
     if (!isOcrEnabled) {
-      setIsSelectionMode(false);
-      clearSelectionOverlay();
+      // Non disattivare più la modalità selezione quando l'OCR viene disabilitato
+      // setIsSelectionMode(false);
       clearAutoOcrSchedule();
       autoOcrRectRef.current = null;
       isAutoOcrBusyRef.current = false;
@@ -2368,10 +3503,28 @@ function App() {
       return;
     }
     setOcrStatus("OCR attivo");
-  }, [clearAutoOcrSchedule, clearSelectionOverlay, isOcrEnabled]);
+  }, [clearAutoOcrSchedule, isOcrEnabled]);
+
 
   const penSizePopoverStyle = getSizePopoverStyle(penToolRef.current);
   const eraserSizePopoverStyle = getSizePopoverStyle(eraserToolRef.current);
+  const documentHeight = pages.length * PAGE_HEIGHT + Math.max(0, pages.length - 1) * PAGE_SEPARATOR_HEIGHT;
+  const slotRenderItems = slotAssignments
+    .map((pageId, slotId) => {
+      if (!pageId) {
+        return null;
+      }
+      const pageIndex = pageIndexById.get(pageId);
+      if (pageIndex === undefined) {
+        return null;
+      }
+      return {
+        slotId,
+        pageId,
+        pageIndex
+      };
+    })
+    .filter((item): item is { slotId: number; pageId: string; pageIndex: number } => item !== null);
 
   return (
     <main className="whiteboard-app">
@@ -2381,36 +3534,65 @@ function App() {
         onPointerMove={handleBoardPointerMove}
         onPointerLeave={hideEraserPreview}
       >
-        <div
-          className={backgroundMode === "grid" ? "canvas-wrapper grid-background" : "canvas-wrapper"}
-          ref={wrapperRef}
-        >
-          <canvas ref={drawingCanvasRef} />
-          <canvas
-            className={`selection-canvas ${isSelectionMode ? "enabled" : ""}`}
-            ref={selectionCanvasRef}
-            style={{ display: isSelectionMode ? "block" : "none" }}
-            onPointerDown={handleSelectionPointerDown}
-            onPointerMove={handleSelectionPointerMove}
-            onPointerUp={(event) => {
-              void handleSelectionPointerUp(event);
-            }}
-            onPointerLeave={() => {
-              if (selectionDragRef.current.active) {
-                selectionDragRef.current.active = false;
-                clearSelectionOverlay();
-              }
-            }}
-          />
-          <div className="page-separators">
-            {pages.slice(0, -1).map((page, index) => (
+        <div className="board-pages board-pages-virtual" ref={boardPagesRef} style={{ height: `${documentHeight}px` }}>
+          {pages.map((page, index) => (
+            <div
+              className="board-page-sentinel"
+              key={`${page.id}-sentinel`}
+              ref={getPageSentinelRef(page.id)}
+              style={{
+                top: `${getPageTop(index)}px`,
+                height: `${PAGE_HEIGHT}px`
+              }}
+            />
+          ))}
+          {pages.slice(0, -1).map((page, index) => (
+            <div
+              className="page-separator"
+              key={`${page.id}-separator`}
+              style={{ top: `${getPageTop(index) + PAGE_HEIGHT}px` }}
+            />
+          ))}
+          {slotRenderItems.map(({ slotId, pageId, pageIndex }) => (
+            <div
+              className={pageIndex === currentPageIndex ? "board-page board-page-slot is-active" : "board-page board-page-slot"}
+              key={`slot-${slotId}`}
+              style={{ top: `${getPageTop(pageIndex)}px` }}
+              onPointerDown={() => {
+                setCurrentPageFromIndex(pageIndex);
+              }}
+            >
               <div
-                className="page-separator"
-                key={`${page.id}-separator`}
-                style={{ top: `${getPageTop(index) + PAGE_HEIGHT}px` }}
-              />
-            ))}
-          </div>
+                className={backgroundMode === "grid" ? "canvas-wrapper grid-background" : "canvas-wrapper"}
+                style={{ height: `${PAGE_HEIGHT}px` }}
+              >
+                <canvas
+                  ref={getDrawingCanvasRef(slotId)}
+                />
+                <canvas
+                  className={`selection-canvas ${isSelectionMode && pageIndex === currentPageIndex ? "enabled" : ""}`}
+                  ref={getSelectionCanvasRef(slotId)}
+                  style={{ display: isSelectionMode && pageIndex === currentPageIndex ? "block" : "none" }}
+                  onPointerDown={(event) => {
+                    handleSelectionPointerDown(pageId, event);
+                  }}
+                  onPointerMove={(event) => {
+                    handleSelectionPointerMove(pageId, event);
+                  }}
+                  onPointerUp={(event) => {
+                    void handleSelectionPointerUp(pageId, event);
+                  }}
+                  onPointerLeave={() => {
+                    if (selectionDragRef.current.active && selectionDragRef.current.pageId === pageId) {
+                      selectionDragRef.current.active = false;
+                      selectionDragRef.current.pageId = null;
+                      clearSelectionOverlay(pageId);
+                    }
+                  }}
+                />
+              </div>
+            </div>
+          ))}
           <div className="eraser-preview" ref={eraserPreviewRef} />
         </div>
       </div>
@@ -2518,6 +3700,23 @@ function App() {
           <i className="fa-solid fa-hand" />
           <span className="sr-only">Mano</span>
         </button>
+        <button
+          className={`icon-button ${isSelectionMode ? "active" : ""}`}
+          onClick={() => {
+            const newSelectionMode = !isSelectionMode;
+            setIsSelectionMode(newSelectionMode);
+            if (newSelectionMode) {
+              setTool("pan");
+            }
+          }}
+          title="Selezione multipla"
+          aria-label="Selezione multipla"
+          type="button"
+          disabled={isOcrRunning}
+        >
+          <i className="fa-solid fa-arrow-pointer" />
+          <span className="sr-only">Selezione multipla</span>
+        </button>
         <div className="ocr-switch-control" aria-label="Interruttore OCR">
           <span className="ocr-switch-label">OCR</span>
           <label className="ocr-switch">
@@ -2555,6 +3754,26 @@ function App() {
         <button className="icon-button" title="Undo" aria-label="Undo" type="button" onClick={() => void undo()}>
           <i className="fa-solid fa-rotate-left" />
           <span className="sr-only">Undo</span>
+        </button>
+        <button
+          className="icon-button"
+          title="Copia oggetto"
+          aria-label="Copia oggetto"
+          type="button"
+          onClick={() => void copyCanvasSelection()}
+        >
+          <i className="fa-solid fa-copy" />
+          <span className="sr-only">Copia oggetto</span>
+        </button>
+        <button
+          className="icon-button"
+          title="Incolla oggetto"
+          aria-label="Incolla oggetto"
+          type="button"
+          onClick={() => void pasteCanvasSelection()}
+        >
+          <i className="fa-solid fa-paste" />
+          <span className="sr-only">Incolla oggetto</span>
         </button>
         <button className="icon-button" title="Redo" aria-label="Redo" type="button" onClick={() => void redo()}>
           <i className="fa-solid fa-rotate-right" />
