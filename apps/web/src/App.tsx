@@ -256,9 +256,7 @@ function loadInitialDocument(): PersistedDocument {
   return {
     pages: [firstPage],
     canvasData: null,
-    pageCanvasData: {
-      [firstPage.id]: null
-    },
+    pageCanvasData: {},
     journalEntries: loadInitialJournalEntries()
   };
 }
@@ -854,15 +852,15 @@ function App() {
   );
 
   const loadCanvasDataIntoCanvas = useCallback(
-    async (canvas: FabricCanvas, canvasData: string | null, pageIdForOverlay?: string) => {
+    async (canvas: FabricCanvas, pageCanvasData: string | null, pageIdForOverlay?: string) => {
       isRestoringRef.current = true;
       canvas.clear();
       if (pageIdForOverlay) {
         clearSelectionOverlay(pageIdForOverlay);
       }
 
-      if (canvasData) {
-        const parsed = JSON.parse(canvasData) as Record<string, unknown>;
+      if (pageCanvasData) {
+        const parsed = JSON.parse(pageCanvasData) as Record<string, unknown>;
         await canvas.loadFromJSON(parsed);
       }
       canvas.requestRenderAll();
@@ -872,12 +870,12 @@ function App() {
   );
 
   const loadCanvasDataForPage = useCallback(
-    async (pageId: string, canvasData: string | null) => {
+    async (pageId: string, pageCanvasData: string | null) => {
       const canvas = getCanvasByPageId(pageId);
       if (!canvas) {
         return;
       }
-      await loadCanvasDataIntoCanvas(canvas, canvasData, pageId);
+      await loadCanvasDataIntoCanvas(canvas, pageCanvasData, pageId);
     },
     [getCanvasByPageId, loadCanvasDataIntoCanvas]
   );
@@ -925,8 +923,6 @@ function App() {
       currentPageIndexRef.current = 0;
       setCurrentPageIndex(0);
       setPages(normalizedPages);
-      setJournalEntries(normalizedJournalEntries);
-      historyStacksRef.current = {};
 
       await Promise.all(
         normalizedPages.map(async (page) => {
@@ -952,27 +948,7 @@ function App() {
     return buildPersistedDocument(normalizedPages, nextPageCanvasData, journalEntriesRef.current);
   }, [buildPersistedDocument, getCurrentPageId, snapshotCanvasByPageId]);
 
-  const checkDocumentHasContent = useCallback((document: PersistedDocument): boolean => {
-    // Controlla se ci sono oggetti nei canvas
-    for (const pageId of Object.keys(document.pageCanvasData)) {
-      const canvas = getCanvasByPageId(pageId);
-      if (canvas && canvas.getObjects().length > 0) {
-        return true;
-      }
-    }
-    
-    // Controlla se ci sono voci nel giornale non vuote
-    const hasJournalContent = document.journalEntries.some(entry => 
-      entry.date.trim() || 
-      entry.accountName.trim() || 
-      entry.description.trim() || 
-      entry.debit.trim() || 
-      entry.credit.trim()
-    );
-    
-    return hasJournalContent;
-  }, [getCanvasByPageId]);
-
+  
   const buildArchivePreviewImages = useCallback(async (): Promise<string[]> => {
     try {
       const previewImages: string[] = [];
@@ -3089,8 +3065,12 @@ function App() {
           return;
         }
         if (appSettings) {
-          setBackgroundMode(appSettings.backgroundMode);
-          activeArchiveDocumentIdRef.current = appSettings.activeArchiveDocumentId;
+          if (appSettings.backgroundMode) {
+            setBackgroundMode(appSettings.backgroundMode);
+          }
+          if (appSettings.activeArchiveDocumentId !== undefined) {
+            activeArchiveDocumentIdRef.current = appSettings.activeArchiveDocumentId;
+          }
         }
         setIsOcrEnabled(false);
         if (indexedDocument) {
@@ -3557,7 +3537,7 @@ function App() {
             <div
               className={pageIndex === currentPageIndex ? "board-page board-page-slot is-active" : "board-page board-page-slot"}
               key={`slot-${slotId}`}
-              style={{ top: `${getPageTop(pageIndex)}px` }}
+              style={{ top: `${getPageTop(pageIndex)}px`, position: 'absolute', left: '0', right: '0' }}
               onPointerDown={() => {
                 setCurrentPageFromIndex(pageIndex);
               }}

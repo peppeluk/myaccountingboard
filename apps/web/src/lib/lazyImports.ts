@@ -13,3 +13,4 @@ export type MathJSModule = typeof import('mathjs');
 // Extract specific types from fabric module
 export type FabricCanvas = import('fabric').Canvas;
 export type FabricLine = import('fabric').Line;
+export type FabricObject = import('fabric').Object;

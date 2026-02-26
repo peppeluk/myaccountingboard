@@ -17,6 +17,7 @@ export type BoardJournalEntry = {
 export type BoardDocument = {
   pages: BoardPage[];
   canvasData: string | null;
+  pageCanvasData: Record<string, string | null>;
   journalEntries: BoardJournalEntry[];
 };
 
@@ -27,6 +28,30 @@ export type ArchivedBoardDocument = {
   pageCount: number;
   previewImages: string[];
   journalPreview: BoardJournalEntry[];
+};
+
+export type AppSettings = {
+  theme?: 'light' | 'dark';
+  autoSave?: boolean;
+  backgroundMode?: 'plain' | 'grid';
+  activeArchiveDocumentId?: string | null;
+};
+
+export const loadAppSettings = async (): Promise<AppSettings> => {
+  try {
+    const stored = localStorage.getItem('myaccounting-settings');
+    return stored ? JSON.parse(stored) : {};
+  } catch {
+    return {};
+  }
+};
+
+export const saveAppSettings = async (settings: AppSettings): Promise<void> => {
+  try {
+    localStorage.setItem('myaccounting-settings', JSON.stringify(settings));
+  } catch (error) {
+    console.error('Failed to save app settings:', error);
+  }
 };
 
 type StoredBoardRecord = {
@@ -141,6 +166,7 @@ function normalizeBoardDocument(input: unknown): BoardDocument | null {
   return {
     pages,
     canvasData: typeof raw.canvasData === "string" ? raw.canvasData : null,
+    pageCanvasData: {},
     journalEntries
   };
 }
