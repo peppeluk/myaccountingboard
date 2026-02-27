@@ -71,18 +71,22 @@ const ARCHIVE_KEY_PREFIX = "archive:";
 
 let databasePromise: Promise<IDBDatabase> | null = null;
 
-function pad(value: number): string {
-  return value.toString().padStart(2, "0");
+// 🎯 Contatore progressivo per nomi archivi - salvato in localStorage
+function getArchiveCounter(): number {
+  const saved = localStorage.getItem('myaccounting_archive_counter');
+  return saved ? parseInt(saved, 10) : 1;
 }
 
-function buildBoardFileName(timestamp: number): string {
-  const date = new Date(timestamp);
-  const m = pad(date.getMonth() + 1);
-  const d = pad(date.getDate());
-  const h = pad(date.getHours());
-  const min = pad(date.getMinutes());
-  const s = pad(date.getSeconds());
-  return `MA_${d}${m}_${h}${min}${s}.mbd`;
+function incrementArchiveCounter(): void {
+  const current = getArchiveCounter();
+  localStorage.setItem('myaccounting_archive_counter', (current + 1).toString());
+}
+
+function buildArchiveFileName(): string {
+  const counter = getArchiveCounter();
+  const fileName = `MyAcc_${counter}.mbd`;
+  incrementArchiveCounter(); // Incrementa contatore
+  return fileName;
 }
 
 function isArchiveKey(value: string): boolean {
@@ -163,10 +167,14 @@ function normalizeBoardDocument(input: unknown): BoardDocument | null {
         .filter((item): item is BoardJournalEntry => item !== null)
     : [];
 
+  const pageCanvasData = typeof raw.pageCanvasData === "object" && raw.pageCanvasData !== null
+    ? raw.pageCanvasData as Record<string, string | null>
+    : {};
+
   return {
     pages,
     canvasData: typeof raw.canvasData === "string" ? raw.canvasData : null,
-    pageCanvasData: {},
+    pageCanvasData,
     journalEntries
   };
 }
@@ -239,7 +247,7 @@ export async function saveLastBoardDocument(document: BoardDocument): Promise<vo
   const record: StoredBoardRecord = {
     id: LAST_OPENED_DOCUMENT_KEY,
     format: "mbd-json-v1",
-    fileName: buildBoardFileName(now),
+    fileName: "MYAccounting_LastOpened.mbd",  // 🎯 Nome fisso per last document (non sovrascrive archivi)
     updatedAt: now,
     data: normalized
   };
@@ -274,10 +282,34 @@ export async function archiveBoardDocument(
 
   const now = Date.now();
   const key = archiveId && isArchiveKey(archiveId) ? archiveId : buildArchiveKey(now);
+  
+  // 🎯 Se è un aggiornamento, mantieni il nome esistente
+  let fileName: string;
+  if (archiveId && isArchiveKey(archiveId)) {
+    // Recupera il nome esistente per non sovrascriverlo
+    try {
+      const database = await openDatabase();
+      const existingRecord = await new Promise<StoredBoardRecord | undefined>((resolve) => {
+        const transaction = database.transaction(STORE_NAME, "readonly");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.get(archiveId);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => resolve(undefined);
+      });
+      
+      fileName = existingRecord?.fileName || buildArchiveFileName();
+    } catch {
+      fileName = buildArchiveFileName();
+    }
+  } else {
+    // Nuovo archivio, usa contatore progressivo
+    fileName = buildArchiveFileName();
+  }
+  
   const record: StoredBoardRecord = {
     id: key,
     format: "mbd-json-v1",
-    fileName: buildBoardFileName(now),
+    fileName,  // 🎯 Mantiene nome esistente o usa progressivo
     updatedAt: now,
     previewImages: normalizePreviewImages(previewImages),
     data: normalized

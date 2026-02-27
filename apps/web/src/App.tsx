@@ -16,6 +16,7 @@ import {
   type ArchivedBoardDocument,
   type BoardDocument
 } from "./lib/boardStorage";
+import { waitForSaveComplete } from "./lib/saveManager";
 
 type Tool = "pen" | "eraser" | "line" | "pan";
 type SizeLevel = "thin" | "medium" | "large";
@@ -63,7 +64,7 @@ const PEN_DECIMATE = 0.6;
 const SNAPSHOT_NUMBER_PRECISION = 2;
 const PDF_EXPORT_MULTIPLIER = 1.25;
 const PDF_EXPORT_JPEG_QUALITY = 0.72;
-const ARCHIVE_PREVIEW_WIDTH = 180;
+const ARCHIVE_PREVIEW_WIDTH = 120;  // 🎯 Ridotto da 180 a 120 per anteprime più piccole e definite
 const ARCHIVE_PREVIEW_JPEG_QUALITY = 0.62;
 const GRID_BACKGROUND_COLOR = "rgba(148, 163, 184, 0.35)";
 const GRID_BACKGROUND_SIZE = 28;
@@ -416,6 +417,7 @@ function App() {
   const [archiveMessage, setArchiveMessage] = useState("");
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
   const [isSharingFiles, setIsSharingFiles] = useState(false);
+  const [isPdfExporting, setIsPdfExporting] = useState(false);  // 🎯 Loading per PDF
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
     () => initialDocumentRef.current.journalEntries
   );
@@ -888,26 +890,32 @@ function App() {
     };
   }, [snapshotCanvasByPageId]);
 
-  const persistCurrentDocument = useCallback(() => {
-    const pageId = getCurrentPageId();
-    if (!pageId) {
-      return;
-    }
-    const snapshot = snapshotCanvasByPageId(pageId);
-    if (!snapshot) {
-      return;
-    }
-    if (pageCanvasDataRef.current[pageId] === snapshot) {
-      return;
-    }
-    persistDocument(pagesRef.current, {
-      ...pageCanvasDataRef.current,
-      [pageId]: snapshot
-    });
-  }, [getCurrentPageId, persistDocument, snapshotCanvasByPageId]);
+  // DEPRECATED: Usare forceSaveAllPages dal saveManager per forza salvataggio
+  // const persistCurrentDocument = useCallback(() => {
+  //   const pageId = getCurrentPageId();
+  //   if (!pageId) {
+  //     return;
+  //   }
+  //   const snapshot = snapshotCanvasByPageId(pageId);
+  //   if (!snapshot) {
+  //     return;
+  //   }
+  //   if (pageCanvasDataRef.current[pageId] === snapshot) {
+  //     return;
+  //   }
+  //   persistDocument(pagesRef.current, {
+  //     ...pageCanvasDataRef.current,
+  //     [pageId]: snapshot
+  //   });
+  // }, [getCurrentPageId, persistDocument, snapshotCanvasByPageId]);
 
   const applyPersistedDocument = useCallback(
     async (document: PersistedDocument) => {
+      console.log("🔄 applyPersistedDocument: INIZIO caricamento documento archiviato");
+      console.log(`🔄 applyPersistedDocument: Pagine da caricare: ${document.pages.length}`);
+      console.log(`🔄 applyPersistedDocument: Canvas data disponibili: ${Object.keys(document.pageCanvasData).length}`);
+      console.log(`🔄 applyPersistedDocument: Journal entries disponibili: ${document.journalEntries?.length || 0}`);
+      
       const normalizedPages = document.pages.length > 0 ? document.pages : [createPage(0)];
       const normalizedPageCanvasData = normalizePageCanvasDataForPages(
         normalizedPages,
@@ -917,52 +925,96 @@ function App() {
       const normalizedJournalEntries = ensureMinimumJournalEntries(
         normalizeJournalEntries(document.journalEntries)
       );
+      
+      console.log(`🔄 applyPersistedDocument: Journal entries normalizzate: ${normalizedJournalEntries.length}`);
+      
+      // 🚨 CRITICO: Imposta i dati PRIMA di tutto
       pagesRef.current = normalizedPages;
       pageCanvasDataRef.current = normalizedPageCanvasData;
       journalEntriesRef.current = normalizedJournalEntries;
       currentPageIndexRef.current = 0;
       setCurrentPageIndex(0);
       setPages(normalizedPages);
-
+      setJournalEntries(normalizedJournalEntries);  // 🎯 AGGIUNTO: Aggiorna stato giornale!
+      
+      console.log("🔄 applyPersistedDocument: Dati impostati, inizio caricamento canvas...");
+      
+      // 🚨 CRITICO: Carica solo i canvas che esistono già (montati)
       await Promise.all(
         normalizedPages.map(async (page) => {
-          await loadCanvasDataForPage(page.id, normalizedPageCanvasData[page.id] ?? null);
-          resetHistoryForPage(page.id);
+          const canvas = getCanvasByPageId(page.id);
+          const canvasData = normalizedPageCanvasData[page.id] ?? null;
+          
+          console.log(`🔄 applyPersistedDocument: Pagina ${page.name} - canvas disponibile: ${canvas ? 'SÌ' : 'NO'}, dati: ${canvasData?.length || 0} bytes`);
+          
+          if (canvas && canvasData) {
+            await loadCanvasDataForPage(page.id, canvasData);
+            resetHistoryForPage(page.id);
+            console.log(`🔄 applyPersistedDocument: Pagina ${page.name} - canvas caricato`);
+          } else {
+            console.log(`🔄 applyPersistedDocument: Pagina ${page.name} - canvas non disponibile, dati salvati per virtualizzazione futura`);
+            // I dati sono già in pageCanvasDataRef.current, verranno usati quando il canvas verrà montato
+            resetHistoryForPage(page.id);
+          }
         })
       );
+      
+      console.log("🔄 applyPersistedDocument: Caricamento completato");
       containerRef.current?.scrollTo({ top: 0, behavior: "auto" });
     },
-    [loadCanvasDataForPage, resetHistoryForPage]
+    [getCanvasByPageId, loadCanvasDataForPage, resetHistoryForPage, setJournalEntries]
   );
 
   const buildCurrentDocumentSnapshot = useCallback((): PersistedDocument => {
+    console.log("🔧 buildCurrentDocumentSnapshot: INIZIO creazione snapshot");
     const normalizedPages = pagesRef.current.length > 0 ? pagesRef.current : [createPage(0)];
+    
+    // 🚨 CRITICO: Copia TUTTI i dati canvas esistenti, non solo quelli della pagina attiva
     const nextPageCanvasData = { ...pageCanvasDataRef.current };
+    console.log(`🔧 buildCurrentDocumentSnapshot: Dati canvas esistenti copiati: ${Object.keys(nextPageCanvasData).length}`);
+    
+    // 🚨 CRITICO: Verifica e forza salvataggio pagina attiva
     const activePageId = getCurrentPageId();
     if (activePageId) {
       const activeSnapshot = snapshotCanvasByPageId(activePageId);
-      if (activeSnapshot) {
+      if (activeSnapshot && activeSnapshot.length > 32) {
+        console.log(`🔧 buildCurrentDocumentSnapshot: Salvataggio pagina attiva ${activePageId} - ${activeSnapshot.length} bytes`);
         nextPageCanvasData[activePageId] = activeSnapshot;
+      } else {
+        console.log(`🔧 buildCurrentDocumentSnapshot: Pagina attiva ${activePageId} senza dati validi (${activeSnapshot?.length || 0} bytes)`);
       }
     }
+    
+    // 🚨 DEBUG: Verifica finale dati
+    console.log(`🔧 buildCurrentDocumentSnapshot: Canvas data finali: ${Object.keys(nextPageCanvasData).length}`);
+    Object.entries(nextPageCanvasData).forEach(([pageId, data]) => {
+      console.log(`🔧 buildCurrentDocumentSnapshot: ${pageId}: ${data?.length || 0} bytes`);
+    });
+    
     return buildPersistedDocument(normalizedPages, nextPageCanvasData, journalEntriesRef.current);
   }, [buildPersistedDocument, getCurrentPageId, snapshotCanvasByPageId]);
 
   
   const buildArchivePreviewImages = useCallback(async (): Promise<string[]> => {
     try {
+      console.log("🖼️ buildArchivePreviewImages: INIZIO");
       const previewImages: string[] = [];
       const baseWidth = Math.max(1, Math.floor(containerRef.current?.clientWidth ?? 1200));
       const previewHeight = Math.max(1, Math.round((PAGE_HEIGHT / baseWidth) * ARCHIVE_PREVIEW_WIDTH));
       const gridMultiplier = ARCHIVE_PREVIEW_WIDTH / baseWidth;
 
+      console.log(`🖼️ buildArchivePreviewImages: Processo ${pagesRef.current.length} pagine`);
+
       for (let index = 0; index < pagesRef.current.length; index += 1) {
         const page = pagesRef.current[index];
+        console.log(`🖼️ buildArchivePreviewImages: Processo pagina ${index + 1}: ${page.name}`);
+        
         const previewCanvas = document.createElement("canvas");
         previewCanvas.width = ARCHIVE_PREVIEW_WIDTH;
         previewCanvas.height = previewHeight;
         const context = previewCanvas.getContext("2d");
         if (!context) {
+          console.log(`🖼️ buildArchivePreviewImages: ERRORE - nessun context per pagina ${page.name}`);
           continue;
         }
 
@@ -978,28 +1030,11 @@ function App() {
           );
         }
 
-        const mountedCanvas = getCanvasByPageId(page.id);
-        const mountedSource = mountedCanvas
-          ? (mountedCanvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl
-          : null;
-        if (mountedSource) {
-          context.drawImage(
-            mountedSource,
-            0,
-            0,
-            Math.max(1, mountedSource.width),
-            Math.max(1, mountedSource.height),
-            0,
-            0,
-            previewCanvas.width,
-            previewCanvas.height
-          );
-          previewImages.push(previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY));
-          continue;
-        }
-
         const snapshot = pageCanvasDataRef.current[page.id];
-        if (snapshot) {
+        console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - snapshot disponibile: ${snapshot ? 'SÌ' : 'NO'} (${snapshot?.length || 0} bytes)`);
+
+        if (snapshot && snapshot.length > 32) {
+          console.log(`🖼️ Anteprima ${page.name} - usando snapshot da pageCanvasDataRef: ${snapshot.length} bytes`);
           try {
             const fabricModule = fabricModuleRef.current ?? (await lazyImportFabric());
             if (!fabricModuleRef.current) {
@@ -1011,11 +1046,36 @@ function App() {
               renderOnAddRemove: false
             });
             try {
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - creazione temp canvas ${baseWidth}x${PAGE_HEIGHT}`);
               tempCanvas.setDimensions({ width: baseWidth, height: PAGE_HEIGHT });
+
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - parsing JSON snapshot...`);
               const parsed = JSON.parse(snapshot) as Record<string, unknown>;
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - JSON parsed: ${Object.keys(parsed).length} keys`);
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - JSON keys:`, Object.keys(parsed));
+
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - loading into temp canvas...`);
               await tempCanvas.loadFromJSON(parsed);
-              tempCanvas.requestRenderAll();
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - loaded, objects: ${tempCanvas.getObjects().length}`);
+
+              // 🚨 CRITICO: Forza rendering sincrono completo
+              tempCanvas.renderAll();
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - renderAll() completato`);
+
+              // 🚨 CRITICO: Attendi un frame per assicurare rendering completo
+              await new Promise(resolve => requestAnimationFrame(resolve));
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - frame completato`);
+
               const source = (tempCanvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl ?? tempCanvasEl;
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - source canvas: ${source.width}x${source.height}`);
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - source canvas data: ${source.toDataURL().length} chars`);
+
+              // 🚨 CRITICO: Verifica se il canvas ha contenuto
+              const ctx = source.getContext('2d');
+              const imageData = ctx?.getImageData(0, 0, source.width, source.height);
+              const hasContent = imageData?.data.some((value, index) => index % 4 === 3 && value !== 0); // Check alpha channel
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - ha contenuto: ${hasContent ? 'SÌ' : 'NO'}`);
+
               context.drawImage(
                 source,
                 0,
@@ -1027,18 +1087,93 @@ function App() {
                 previewCanvas.width,
                 previewCanvas.height
               );
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - disegnato su preview canvas`);
+
+              // 🚨 CRITICO: Verifica preview canvas
+              const previewData = context.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+              const previewHasContent = previewData.data.some((value, index) => index % 4 === 3 && value !== 0);
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - preview ha contenuto: ${previewHasContent ? 'SÌ' : 'NO'}`);
+
+              const dataUrl = previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY);
+              previewImages.push(dataUrl);
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - snapshot salvato (${dataUrl.length} chars)`);
+              continue; // 🚨 CRITICO: Salta il push finale!
             } finally {
               tempCanvas.dispose();
+              console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - temp canvas disposed`);
             }
-          } catch {
-            // Keep white page when snapshot cannot be rendered.
+          } catch (error) {
+            console.error(`🖼️ buildArchivePreviewImages: ERRORE nel renderizzare snapshot per ${page.name}:`, error);
+            console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - fallback a canvas montato`);
+            // Continue to canvas mounted fallback
           }
+        } else {
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - NESSUN snapshot valido (${snapshot?.length || 0} bytes)`);
         }
-        previewImages.push(previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY));
+
+        // 🚨 FALLBACK: Usa canvas montato
+        const canvas = getCanvasByPageId(page.id);
+        const sourceCanvas = canvas
+          ? (canvas as unknown as { lowerCanvasEl?: HTMLCanvasElement }).lowerCanvasEl
+          : null;
+
+        console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - canvas montato disponibile: ${canvas ? 'SÌ' : 'NO'}`);
+        console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - sourceCanvas disponibile: ${sourceCanvas ? 'SÌ' : 'NO'}`);
+
+        if (canvas && sourceCanvas) {
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - uso canvas montato (fallback)`);
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - canvas dimensions: ${canvas.getWidth()}x${canvas.getHeight()}`);
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - sourceCanvas dimensions: ${sourceCanvas.width}x${sourceCanvas.height}`);
+          
+          // 🚨 CRITICO: Verifica se il canvas montato ha contenuto reale
+          const canvasCtx = sourceCanvas.getContext('2d');
+          const canvasImageData = canvasCtx?.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+          const canvasHasContent = canvasImageData?.data.some((value, index) => index % 4 === 3 && value !== 0);
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - canvas montato ha contenuto: ${canvasHasContent ? 'SÌ' : 'NO'}`);
+          
+          if (!canvasHasContent) {
+            console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - canvas montato VUOTO, uso pagina bianca`);
+            // Usa pagina bianca invece del canvas vuoto
+            const dataUrl = previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY);
+            previewImages.push(dataUrl);
+            console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - pagina bianca salvata (${dataUrl.length} chars)`);
+            continue;
+          }
+
+          const canvasWidth = Math.max(1, canvas.getWidth());
+          const previewHeight = Math.max(1, Math.round((PAGE_HEIGHT / canvasWidth) * ARCHIVE_PREVIEW_WIDTH));
+          previewCanvas.height = previewHeight;
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - preview height: ${previewHeight}`);
+
+          context.drawImage(
+            sourceCanvas,
+            0,
+            0,
+            Math.max(1, sourceCanvas.width),
+            Math.max(1, sourceCanvas.height),
+            0,
+            0,
+            previewCanvas.width,
+            previewCanvas.height
+          );
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - disegnato canvas montato su preview`);
+
+          const dataUrl = previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY);
+          previewImages.push(dataUrl);
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - canvas montato salvato (${dataUrl.length} chars)`);
+        } else {
+          // 🚨 ULTIMO FALLBACK: Pagina bianca
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - NESSUN canvas, uso pagina bianca`);
+          const dataUrl = previewCanvas.toDataURL("image/jpeg", ARCHIVE_PREVIEW_JPEG_QUALITY);
+          previewImages.push(dataUrl);
+          console.log(`🖼️ buildArchivePreviewImages: Pagina ${page.name} - pagina bianca salvata (${dataUrl.length} chars)`);
+        }
       }
 
+      console.log(`🖼️ buildArchivePreviewImages: COMPLETATO - ${previewImages.length} immagini generate`);
       return previewImages;
-    } catch {
+    } catch (error) {
+      console.error("🖼️ buildArchivePreviewImages: ERRORE GRAVE:", error);
       return [];
     }
   }, [backgroundMode, getCanvasByPageId]);
@@ -1190,10 +1325,125 @@ function App() {
     [loadArchiveEntries]
   );
 
+  // 🎯 FUNZIONE DI SALVATAGGIO UNIFICATA
+  const saveCurrentState = useCallback(async (force: boolean = false) => {
+    console.log("💾 saveCurrentState: INIZIO salvataggio unificato");
+    console.log(`💾 saveCurrentState: Pagine totali: ${pagesRef.current.length}`);
+    console.log(`💾 saveCurrentState: Dati canvas esistenti: ${Object.keys(pageCanvasDataRef.current).length}`);
+    
+    try {
+      // Salva la pagina corrente
+      const currentPageId = getCurrentPageId();
+      if (currentPageId) {
+        const snapshot = snapshotCanvasByPageId(currentPageId);
+        console.log(`💾 saveCurrentState: Pagina corrente ${currentPageId} - snapshot: ${snapshot?.length || 0} bytes`);
+        
+        if (snapshot && snapshot.length > 32) {
+          const existingData = pageCanvasDataRef.current[currentPageId];
+          if (!existingData || snapshot.length >= existingData.length || force) {
+            const updatedCanvasData = {
+              ...pageCanvasDataRef.current,
+              [currentPageId]: snapshot
+            };
+            
+            console.log(`💾 saveCurrentState: Prima del salvataggio - dati canvas: ${Object.keys(updatedCanvasData).length} pagine`);
+            
+            // Salva immediatamente senza debounce
+            if (documentSaveTimeoutRef.current !== null) {
+              window.clearTimeout(documentSaveTimeoutRef.current);
+              documentSaveTimeoutRef.current = null;
+            }
+            
+            pageCanvasDataRef.current = updatedCanvasData;
+            setPages(pagesRef.current);
+            
+            const document = buildPersistedDocument(pagesRef.current, updatedCanvasData, journalEntriesRef.current);
+            pendingDocumentSaveRef.current = document;
+            flushDocumentSave();
+            
+            console.log(`💾 saveCurrentState: Salvato pagina ${currentPageId} - ${snapshot.length} bytes`);
+            console.log(`💾 saveCurrentState: Documento salvato con ${document.pages.length} pagine e ${Object.keys(document.pageCanvasData).length} canvas data`);
+          }
+        } else {
+          console.log(`💾 saveCurrentState: Snapshot troppo corto o nullo (${snapshot?.length || 0} bytes)`);
+        }
+      } else {
+        console.log(`💾 saveCurrentState: Nessuna pagina corrente trovata`);
+      }
+      
+      // Salva anche il giornale se necessario
+      if (journalEntriesRef.current.length > 0) {
+        console.log(`💾 saveCurrentState: Salvato giornale con ${journalEntriesRef.current.length} voci`);
+      }
+      
+      console.log("💾 saveCurrentState: COMPLETATO");
+    } catch (error) {
+      console.error("💾 saveCurrentState: ERRORE:", error);
+    }
+  }, [buildPersistedDocument, flushDocumentSave, getCurrentPageId, snapshotCanvasByPageId]);
+
+  const setCurrentPageFromIndex = useCallback(async (index: number) => {
+    const clampedIndex = clamp(index, 0, Math.max(0, pagesRef.current.length - 1));
+    if (clampedIndex === currentPageIndexRef.current) {
+      return;
+    }
+    
+    // Usa la funzione di salvataggio unificata
+    await saveCurrentState();
+    
+    currentPageIndexRef.current = clampedIndex;
+    setCurrentPageIndex(clampedIndex);
+  }, [saveCurrentState]);
+
   const archiveCurrentDocument = useCallback(
     async (silent: boolean) => {
+      // 🎯 SOLUZIONE: Forza salvataggio di TUTTE le pagine prima di archiviare!
+      console.log("🔍 Inizio archiviazione con salvataggio completo di tutte le pagine...");
+      
+      // 🚨 CRITICO: Forza salvataggio di TUTTI i canvas disponibili prima di creare snapshot
+      console.log("🔸 Forza salvataggio completo canvas prima di archiviare...");
+      for (let i = 0; i < pagesRef.current.length; i += 1) {
+        const page = pagesRef.current[i];
+        const canvas = getCanvasByPageId(page.id);
+        if (canvas) {
+          const snapshot = snapshotCanvasByPageId(page.id);
+          if (snapshot && snapshot.length > 32) {
+            const existingData = pageCanvasDataRef.current[page.id];
+            if (!existingData || snapshot.length >= existingData.length) {
+              const updatedCanvasData = {
+                ...pageCanvasDataRef.current,
+                [page.id]: snapshot
+              };
+              console.log(`🔸 Salvataggio forzato pagina ${page.name} - ${snapshot.length} bytes`);
+              pageCanvasDataRef.current = updatedCanvasData;
+            }
+          }
+        }
+      }
+      
+      // 🚨 CRITICO: Forza salvataggio anche delle pagine virtualizzate con dati esistenti
+      console.log("🔸 Verifica dati canvas esistenti prima di archiviare...");
+      Object.entries(pageCanvasDataRef.current).forEach(([pageId, data]) => {
+        if (data && data.length > 32) {
+          console.log(`🔸 Dati esistenti ${pageId}: ${data.length} bytes - PRESERVATI`);
+        }
+      });
+      
+      // Salva lo stato corrente
+      await saveCurrentState(true);
+      
+      console.log("🔸 Inizio buildCurrentDocumentSnapshot...");
       const currentDocument = buildCurrentDocumentSnapshot();
+      
+      // 🚨 DEBUG: Verifica dati nel documento
+      console.log(`🔸 Documento creato con ${Object.keys(currentDocument.pageCanvasData).length} canvas data`);
+      Object.entries(currentDocument.pageCanvasData).forEach(([pageId, data]) => {
+        console.log(`🔸 Canvas data ${pageId}: ${data?.length || 0} bytes`);
+      });
+      console.log("🔸 Inizio buildArchivePreviewImages...");
       const previewImages = await buildArchivePreviewImages();
+      console.log(`🔸 buildArchivePreviewImages completato: ${previewImages.length} immagini generate`);
+      
       try {
         const archivedKey = await archiveBoardDocument(
           currentDocument,
@@ -1206,13 +1456,15 @@ function App() {
         setActiveArchiveDocumentId(archivedKey);
         await loadArchiveEntries();
         setArchiveMessage("Documento archiviato");
+        console.log("✅ Archiviazione completata con successo!");
       } catch {
         if (!silent) {
           setArchiveMessage("Archiviazione fallita");
+          console.error("❌ Archiviazione fallita!");
         }
       }
     },
-    [buildArchivePreviewImages, buildCurrentDocumentSnapshot, loadArchiveEntries, setActiveArchiveDocumentId]
+    [buildArchivePreviewImages, buildCurrentDocumentSnapshot, loadArchiveEntries, setActiveArchiveDocumentId, saveCurrentState, snapshotCanvasByPageId, getCanvasByPageId]
   );
 
   const saveAndArchiveOnExit = useCallback(() => {
@@ -1244,6 +1496,7 @@ function App() {
     }
     const snapshot = snapshotCanvasByPageId(resolvedPageId);
     if (!snapshot) {
+      // Se non c'è nuovo snapshot (canvas non montato), mantieni i dati esistenti
       return;
     }
 
@@ -1259,6 +1512,7 @@ function App() {
     pageHistory.redo = [];
     historyStacksRef.current[resolvedPageId] = pageHistory;
 
+    // Salva sempre il nuovo snapshot
     const nextPageCanvasData = {
       ...pageCanvasDataRef.current,
       [resolvedPageId]: snapshot
@@ -1635,17 +1889,10 @@ function App() {
     });
   }, []);
 
-  const setCurrentPageFromIndex = useCallback((index: number) => {
-    const clampedIndex = clamp(index, 0, Math.max(0, pagesRef.current.length - 1));
-    if (clampedIndex === currentPageIndexRef.current) {
-      return;
-    }
-    currentPageIndexRef.current = clampedIndex;
-    setCurrentPageIndex(clampedIndex);
-  }, []);
-
   const addPage = useCallback(async () => {
-    persistCurrentDocument();
+    // 🎯 Usa la funzione di salvataggio unificata prima di aggiungere
+    await saveCurrentState();
+    
     const nextPage = createPage(pagesRef.current.length);
     const nextPages = [...pagesRef.current, nextPage];
     const nextPageCanvasData = {
@@ -1655,7 +1902,7 @@ function App() {
     persistDocument(nextPages, nextPageCanvasData);
     historyStacksRef.current[nextPage.id] = { undo: [], redo: [] };
     resizeCanvases();
-  }, [persistCurrentDocument, persistDocument, resizeCanvases]);
+  }, [persistDocument, resizeCanvases, saveCurrentState]);
 
   const clearAllPages = useCallback(async () => {
     if (!window.confirm("Vuoi cancellare tutte le pagine?")) {
@@ -1685,6 +1932,38 @@ function App() {
     if (!window.confirm("Creare un nuovo documento vuoto?")) {
       return;
     }
+
+    // 🚨 DEPRECATED: Non usare forceSaveAllPages - salva solo pagina corrente
+    // Salvataggio manuale della pagina corrente
+    const currentPageId = getCurrentPageId();
+    if (currentPageId) {
+      const snapshot = snapshotCanvasByPageId(currentPageId);
+      if (snapshot && snapshot.length > 32) {
+        const existingData = pageCanvasDataRef.current[currentPageId];
+        if (!existingData || snapshot.length >= existingData.length) {
+          const updatedCanvasData = {
+            ...pageCanvasDataRef.current,
+            [currentPageId]: snapshot
+          };
+          
+          // Salva immediatamente senza debounce
+          if (documentSaveTimeoutRef.current !== null) {
+            window.clearTimeout(documentSaveTimeoutRef.current);
+            documentSaveTimeoutRef.current = null;
+          }
+          
+          pageCanvasDataRef.current = updatedCanvasData;
+          setPages(pagesRef.current);
+          
+          const document = buildPersistedDocument(pagesRef.current, updatedCanvasData, journalEntriesRef.current);
+          pendingDocumentSaveRef.current = document;
+          flushDocumentSave();
+        }
+      }
+    }
+
+    // Attendi che il salvataggio sia completato
+    await waitForSaveComplete(100);
 
     // Archivia sempre il documento corrente (come archiveAndCreateNew)
     const currentDocument = buildCurrentDocumentSnapshot();
@@ -1718,9 +1997,41 @@ function App() {
     flushPendingDocumentSaveNow();
     setIsArchiveOpen(false);
     setArchiveMessage("Nuovo documento creato");
-  }, [applyPersistedDocument, buildArchivePreviewImages, buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
+  }, [applyPersistedDocument, buildArchivePreviewImages, buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow, setActiveArchiveDocumentId, snapshotCanvasByPageId]);
 
   const archiveAndCreateNew = useCallback(async () => {
+    // 🚨 DEPRECATED: Non usare forceSaveAllPages - salva solo pagina corrente
+    // Salvataggio manuale della pagina corrente
+    const currentPageId = getCurrentPageId();
+    if (currentPageId) {
+      const snapshot = snapshotCanvasByPageId(currentPageId);
+      if (snapshot && snapshot.length > 32) {
+        const existingData = pageCanvasDataRef.current[currentPageId];
+        if (!existingData || snapshot.length >= existingData.length) {
+          const updatedCanvasData = {
+            ...pageCanvasDataRef.current,
+            [currentPageId]: snapshot
+          };
+          
+          // Salva immediatamente senza debounce
+          if (documentSaveTimeoutRef.current !== null) {
+            window.clearTimeout(documentSaveTimeoutRef.current);
+            documentSaveTimeoutRef.current = null;
+          }
+          
+          pageCanvasDataRef.current = updatedCanvasData;
+          setPages(pagesRef.current);
+          
+          const document = buildPersistedDocument(pagesRef.current, updatedCanvasData, journalEntriesRef.current);
+          pendingDocumentSaveRef.current = document;
+          flushDocumentSave();
+        }
+      }
+    }
+
+    // Attendi che il salvataggio sia completato
+    await waitForSaveComplete(100);
+
     const currentDocument = buildCurrentDocumentSnapshot();
     const previewImages = await buildArchivePreviewImages();
     try {
@@ -1757,7 +2068,7 @@ function App() {
     } catch {
       setArchiveMessage("Archiviazione fallita");
     }
-  }, [buildArchivePreviewImages, buildCurrentDocumentSnapshot, applyPersistedDocument, flushPendingDocumentSaveNow, loadArchiveEntries, setActiveArchiveDocumentId]);
+  }, [buildArchivePreviewImages, buildCurrentDocumentSnapshot, applyPersistedDocument, flushPendingDocumentSaveNow, loadArchiveEntries, setActiveArchiveDocumentId, snapshotCanvasByPageId]);
 
   const downloadBlob = useCallback((blob: Blob, fileName: string) => {
     const downloadUrl = URL.createObjectURL(blob);
@@ -1869,19 +2180,57 @@ function App() {
   );
 
   const buildPdfBlob = useCallback(async (): Promise<Blob | null> => {
-    persistCurrentDocument();
-
+    // 🚨 SOLUZIONE DRASTICA: Navigazione sequenziale per garantire dati
+    console.log("🔍 Inizio generazione PDF con navigazione sequenziale...");
+    
     const pagesSnapshot = pagesRef.current;
     if (pagesSnapshot.length === 0) {
       return null;
     }
 
+    // Salva la pagina corrente originale
+    const originalPageIndex = currentPageIndexRef.current;
+    
     const { jsPDF } = await lazyImportJsPDF();
     const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
     let hasAtLeastOnePage = false;
 
     for (let i = 0; i < pagesSnapshot.length; i += 1) {
       const page = pagesSnapshot[i];
+      
+      // 🚨 CRITICO: Vai alla pagina i e rendila corrente
+      console.log(`📍 Navigando alla pagina ${i + 1}: ${page.name}`);
+      setCurrentPageFromIndex(i);
+      
+      // Attendi che React aggiorni il DOM
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Salva i dati della pagina corrente
+      const currentPageId = pagesRef.current[i]?.id;
+      if (currentPageId) {
+        const snapshot = snapshotCanvasByPageId(currentPageId);
+        if (snapshot && snapshot.length > 32) {
+          const updatedCanvasData = {
+            ...pageCanvasDataRef.current,
+            [currentPageId]: snapshot
+          };
+          pageCanvasDataRef.current = updatedCanvasData;
+          
+          // Flush immediato
+          if (documentSaveTimeoutRef.current !== null) {
+            window.clearTimeout(documentSaveTimeoutRef.current);
+            documentSaveTimeoutRef.current = null;
+          }
+          
+          const document = buildPersistedDocument(pagesRef.current, updatedCanvasData, journalEntriesRef.current);
+          pendingDocumentSaveRef.current = document;
+          flushDocumentSave();
+          
+          await waitForSaveComplete(50);
+        }
+      }
+      
+      // Ora genera il canvas per questa pagina
       const baseWidth = Math.max(1, Math.floor(containerRef.current?.clientWidth ?? 1200));
       const flattenedCanvas = await renderPageToFlattenedCanvas(
         page.id,
@@ -1889,7 +2238,9 @@ function App() {
         PAGE_HEIGHT * PDF_EXPORT_MULTIPLIER,
         PDF_EXPORT_MULTIPLIER
       );
+      
       if (!flattenedCanvas) {
+        console.log(`⚠️ Pagina ${page.name} - canvas non generato, salto`);
         continue;
       }
 
@@ -1899,31 +2250,44 @@ function App() {
       const ratio = Math.max(1, flattenedCanvas.width) / Math.max(1, flattenedCanvas.height);
       const drawWidth = pageWidth - 30;
       const drawHeight = drawWidth / ratio;
-      const y = Math.max(15, (pageHeight - drawHeight) / 2);
+      const y = (pageHeight - drawHeight) / 2;
 
-      if (hasAtLeastOnePage) {
+      if (i > 0) {
         doc.addPage();
       }
       doc.addImage(image, "JPEG", 15, y, drawWidth, drawHeight, undefined, "MEDIUM");
       hasAtLeastOnePage = true;
+      
+      console.log(`✅ Pagina ${page.name} aggiunta al PDF`);
     }
+
+    // Ripristina la pagina originale
+    console.log(`🔙 Ripristino pagina originale: ${originalPageIndex + 1}`);
+    setCurrentPageFromIndex(originalPageIndex);
 
     if (!hasAtLeastOnePage) {
       return null;
     }
+    
+    console.log("🎉 PDF generato con successo!");
     return doc.output("blob");
-  }, [persistCurrentDocument, renderPageToFlattenedCanvas]);
+  }, [buildPersistedDocument, flushDocumentSave, renderPageToFlattenedCanvas, setCurrentPageFromIndex, snapshotCanvasByPageId, waitForSaveComplete]);
 
   const exportPdf = useCallback(async () => {
-    const pdfBlob = await buildPdfBlob();
-    if (!pdfBlob) {
-      return;
-    }
+    setIsPdfExporting(true);  // 🎯 Inizia loading
+    try {
+      const pdfBlob = await buildPdfBlob();
+      if (!pdfBlob) {
+        return;
+      }
 
-    const defaultName = buildDocumentBaseName(Date.now());
-    const promptedName = window.prompt("Nome PDF", defaultName);
-    const fileName = (promptedName ?? defaultName).trim() || defaultName;
-    downloadBlob(pdfBlob, `${fileName}.pdf`);
+      const defaultName = buildDocumentBaseName(Date.now());
+      const promptedName = window.prompt("Nome PDF", defaultName);
+      const fileName = (promptedName ?? defaultName).trim() || defaultName;
+      downloadBlob(pdfBlob, `${fileName}.pdf`);
+    } finally {
+      setIsPdfExporting(false);  // 🎯 Fine loading
+    }
   }, [buildPdfBlob, downloadBlob]);
 
   const undo = useCallback(async () => {
@@ -2067,6 +2431,7 @@ function App() {
 
   const shareBoardAndJournal = useCallback(async () => {
     setIsSharingFiles(true);
+    setIsPdfExporting(true);  // Disabilita anche PDF export durante share
     try {
       const now = Date.now();
       const datePart = new Date(now).toISOString().slice(0, 10);
@@ -2107,13 +2472,11 @@ function App() {
       window.alert(
         "Condivisione nativa non disponibile su questo dispositivo. Ho scaricato i due file separati."
       );
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        return;
-      }
+    } catch {
       window.alert("Condivisione non riuscita. Verifica API e riprova.");
     } finally {
       setIsSharingFiles(false);
+      setIsPdfExporting(false);  // Riabilita PDF export
     }
   }, [buildJournalWorkbookBlob, buildPdfBlob, downloadBlob]);
 
@@ -3838,8 +4201,9 @@ function App() {
           aria-label="Salva PDF"
           type="button"
           onClick={() => void exportPdf()}
+          disabled={isPdfExporting}
         >
-          <i className="fa-solid fa-file-pdf" />
+          <i className={`fa-solid ${isPdfExporting ? 'fa-spinner fa-spin' : 'fa-file-pdf'}`} />
           <span className="sr-only">Salva PDF</span>
         </button>
         <button
@@ -3848,9 +4212,9 @@ function App() {
           aria-label="Condividi PDF + XLSX"
           type="button"
           onClick={() => void shareBoardAndJournal()}
-          disabled={isSharingFiles || isJournalExtracting}
+          disabled={isSharingFiles || isJournalExtracting || isPdfExporting}  // 🎯 Disabilita anche se PDF sta esportando
         >
-          <i className="fa-solid fa-share-nodes" />
+          <i className={`fa-solid ${isSharingFiles ? 'fa-spinner fa-spin' : 'fa-share-nodes'}`} />
           <span className="sr-only">Condividi PDF + XLSX</span>
         </button>
         <button

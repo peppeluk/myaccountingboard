@@ -687,7 +687,7 @@ button:disabled {
 .archive-layout {
   height: calc(100% - 50px);
   display: grid;
-  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -782,12 +782,12 @@ button:disabled {
 
 .archive-preview-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
   overflow-y: auto;
   min-height: 0;
   padding-right: 2px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .archive-page-thumb {
@@ -832,7 +832,7 @@ button:disabled {
 .archive-journal-preview {
   border-top: 1px solid #dbe3ed;
   padding-top: 8px;
-  min-height: 0;
+  min-height: 120px;
   display: flex;
   flex-direction: column;
 }
