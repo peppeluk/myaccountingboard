@@ -3,7 +3,7 @@ import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
 import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
-import { normalizeExpression, formatExpressionForDisplay, normalizeOcrOperators, normalizeOcrChunk } from "./utils/ocrUtils";
+import { normalizeExpression, formatExpressionForDisplay, normalizeOcrChunk } from "./utils/ocrUtils";
 import { mergeRecognizedText, formatArchiveDateTime, buildDocumentBaseName, normalizePageCanvasDataForPages, computeVirtualWindowRange, buildIndexRange } from "./utils/appUtils";
 import {
   archiveBoardDocument,
@@ -741,7 +741,7 @@ function App() {
           }
         } catch (error) {
           console.error('❌ Error checking clipboard:', error);
-          alert('❌ Errore: ' + error.message);
+          alert('❌ Errore: ' + (error as Error).message);
         }
       };
       
@@ -2208,7 +2208,7 @@ function App() {
       pages: [firstPage],
       canvasData: null,
       pageCanvasData: emptyPageCanvasData,
-      journal: journalRef.current,
+      journalEntries: createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES)
     };
     persistDocument(nextDocument.pages, nextDocument.pageCanvasData);
     lastOcrChunkRef.current = "";
@@ -2217,7 +2217,6 @@ function App() {
     currentPageIndexRef.current = 0;
     setCurrentPageIndex(0);
     historyStacksRef.current = {};
-    toolRef.current = "pen";
     setTool("pen");
     setIsSelectionMode(false);
     setIsOcrRunning(false);

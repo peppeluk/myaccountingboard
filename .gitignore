@@ -13,3 +13,5 @@ vite.config.d.ts
 # IDE
 .idea/
 .vscode/
+.vercel
+.env*.local
