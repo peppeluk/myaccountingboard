@@ -205,7 +205,7 @@ function AccountPicker({ inputId, entry, accounts, onUpdate }: AccountPickerProp
             applyAccount(filteredAccounts[0]);
           }
         }}
-        placeholder="Cerca conto (codice o nome)"
+        placeholder="Cerca conto..."
       />
       {isOpen && (
         <div className="account-dropdown" role="listbox" aria-label="Piano dei conti">
@@ -250,12 +250,12 @@ export function JournalPanel({
   }
 
   return (
-    <section className="journal-panel" aria-label="Scheda Libro Giornale">
+    <section className="journal-panel" aria-label="Scheda Prima Nota">
       <header className="journal-panel-header">
-        <h3>giornale_data (campi D:E:F:G:H)</h3>
-        <button type="button" onClick={onClose} className="icon-button" aria-label="Chiudi Libro Giornale">
+        <h3>Prima Nota</h3>
+        <button type="button" onClick={onClose} className="icon-button" aria-label="Chiudi Prima Nota">
           <i className="fa-solid fa-xmark" />
-          <span className="sr-only">Chiudi Libro Giornale</span>
+          <span className="sr-only">Chiudi Prima Nota</span>
         </button>
       </header>
 
@@ -265,24 +265,72 @@ export function JournalPanel({
             <tr>
               <th className="journal-date-column">Data</th>
               <th className="journal-account-code-column">Codice</th>
-              <th>E - Conto</th>
-              <th>F - Descrizione</th>
-              <th className="journal-amount-column">G - Dare</th>
-              <th className="journal-amount-column">H - Avere</th>
+              <th>Conto</th>
+              <th>Descrizione</th>
+              <th className="journal-amount-column">DARE</th>
+              <th className="journal-amount-column">AVERE</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {entries.map((entry) => (
               <tr key={entry.id}>
-                <td className="journal-date-cell">
+                <td className="journal-date-cell" style={{ position: 'relative' }}>
                   <input
+                    type="text"
+                    value={entry.date ? new Date(entry.date).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : ''}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      if (value.length === 5 && value.includes('/')) {
+                        const [day, month] = value.split('/');
+                        const year = new Date().getFullYear();
+                        const isoDate = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+                        onUpdateEntry(entry.id, { date: isoDate });
+                      } else if (value === '') {
+                        onUpdateEntry(entry.id, { date: '' });
+                      }
+                    }}
+                    placeholder="gg/mm"
+                    maxLength={5}
+                    style={{ paddingRight: '30px' }}
+                  />
+                  <input
+                    id={`journal-date-${entry.id}`}
                     type="date"
                     value={entry.date}
                     onChange={(event) => {
                       onUpdateEntry(entry.id, { date: event.target.value });
                     }}
+                    style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }}
                   />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const dateInput = document.querySelector(`#journal-date-${entry.id}`) as HTMLInputElement;
+                      if (dateInput) {
+                        dateInput.style.opacity = '1';
+                        dateInput.style.pointerEvents = 'auto';
+                        dateInput.showPicker();
+                        dateInput.addEventListener('change', () => {
+                          dateInput.style.opacity = '0';
+                          dateInput.style.pointerEvents = 'none';
+                        }, { once: true });
+                      }
+                    }}
+                    style={{ 
+                      position: 'absolute', 
+                      right: '8px', 
+                      top: '50%', 
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '2px',
+                      fontSize: '14px'
+                    }}
+                  >
+                    📅
+                  </button>
                 </td>
                 <td className="journal-account-code-cell">
                   {entry.accountCode || <span className="journal-account-code-placeholder">-</span>}
@@ -301,7 +349,7 @@ export function JournalPanel({
                     onChange={(event) => {
                       onUpdateEntry(entry.id, { description: event.target.value });
                     }}
-                    placeholder="Descrizione movimento"
+                    placeholder="Descrizione"
                   />
                 </td>
                 <td className="journal-amount-cell">

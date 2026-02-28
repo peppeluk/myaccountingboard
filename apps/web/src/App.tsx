@@ -5,6 +5,7 @@ import { exportJournalWorkbook } from "./lib/api";
 import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
 import { normalizeExpression, formatExpressionForDisplay, normalizeOcrChunk } from "./utils/ocrUtils";
 import { mergeRecognizedText, formatArchiveDateTime, buildDocumentBaseName, normalizePageCanvasDataForPages, computeVirtualWindowRange, buildIndexRange } from "./utils/appUtils";
+import { useMathRecognition } from './features/math-recognition';
 import {
   archiveBoardDocument,
   deleteArchivedBoardDocument,
@@ -294,6 +295,8 @@ function App() {
   const [isArchiveLoading, setIsArchiveLoading] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState("");
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
+  const [useMathRec, setUseMathRec] = useState(false);
+  const mathRec = useMathRecognition();
   const [isSharingFiles, setIsSharingFiles] = useState(false);
   const [isPdfExporting, setIsPdfExporting] = useState(false);  // 🎯 Loading per PDF
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
@@ -3101,6 +3104,51 @@ function App() {
         multiplier: 2
       });
 
+      // NEW: Try Math Recognition first
+      if (useMathRec && mathRec.isReady) {
+        try {
+          console.log('🧠 Using Math Recognition...');
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = rect.width;
+          tempCanvas.height = rect.height;
+          const tempCtx = tempCanvas.getContext('2d')!;
+          const img = new Image();
+          img.onload = async () => {
+            tempCtx.drawImage(img, 0, 0);
+            const result = await mathRec.recognize(tempCanvas);
+            
+            // Handle delete gesture
+            if (result.expression === 'DELETE') {
+              console.log('🗑️ Delete gesture detected');
+              const activeObject = canvas.getActiveObject();
+              if (activeObject) {
+                canvas.remove(activeObject);
+                canvas.requestRenderAll();
+              }
+              setIsOcrRunning(false);
+              setOcrStatus("Cancellato");
+              isAutoOcrBusyRef.current = false;
+              return;
+            }
+            
+            if (result.expression) {
+              setDisplay(result.expression);
+              setOcrStatus(`Math: ${(result.confidence * 100).toFixed(0)}%`);
+              console.log(`✅ Math recognized: "${result.expression}" (${(result.confidence * 100).toFixed(0)}% confidence)`);
+              setIsOcrRunning(false);
+              isAutoOcrBusyRef.current = false;
+              return;
+            }
+          };
+          img.src = imageData;
+          return;
+        } catch (error) {
+          console.error('❌ Math recognition failed, fallback to Tesseract:', error);
+          // Continue to Tesseract below
+        }
+      }
+
+      // EXISTING: Tesseract logic (unchanged)
       const worker = await getWorker();
       const result = await worker.recognize(imageData);
       if (!isOcrEnabledRef.current) {
@@ -4544,13 +4592,13 @@ function App() {
         </button>
         <button
           className={isJournalOpen ? "active journal-toggle-button" : "journal-toggle-button"}
-          title="giornale_data"
-          aria-label="giornale_data"
+          title="Prima Nota"
+          aria-label="Prima Nota"
           type="button"
           onClick={() => setIsJournalOpen((value) => !value)}
         >
           <i className="fa-solid fa-book-open" />
-          <span>giornale_data</span>
+          <span>Prima Nota</span>
         </button>
         <button
           className={isArchiveOpen ? "icon-button active" : "icon-button"}
@@ -4636,6 +4684,19 @@ function App() {
         >
           <i className="fa-solid fa-trash" />
           <span className="sr-only">Cancella oggetti selezionati</span>
+        </button>
+        <button
+          className={`icon-button ${useMathRec ? 'active' : ''}`}
+          onClick={() => setUseMathRec(!useMathRec)}
+          title={useMathRec ? 'Math Recognition ON' : 'Math Recognition OFF'}
+          aria-label={useMathRec ? 'Disattiva riconoscimento matematico' : 'Attiva riconoscimento matematico'}
+          type="button"
+          disabled={mathRec.isProcessing}
+        >
+          <i className={`fa-solid ${useMathRec ? 'fa-calculator' : 'fa-font'}`} />
+          <span className="sr-only">
+            {useMathRec ? 'Math Recognition ON' : 'Math Recognition OFF'}
+          </span>
         </button>
         <span className="toolbar-status">
           {ocrStatus} | Pagina {currentPageIndex + 1} di {pages.length}
