@@ -3,6 +3,8 @@ import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
 import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
+import { normalizeExpression, formatExpressionForDisplay, normalizeOcrOperators, normalizeOcrChunk } from "./utils/ocrUtils";
+import { mergeRecognizedText, formatArchiveDateTime, buildDocumentBaseName, normalizePageCanvasDataForPages, computeVirtualWindowRange, buildIndexRange } from "./utils/appUtils";
 import {
   archiveBoardDocument,
   deleteArchivedBoardDocument,
@@ -262,130 +264,6 @@ function loadInitialDocument(): PersistedDocument {
   };
 }
 
-function normalizeExpression(input: string): string {
-  return input
-    .replace(/\s+/g, "")
-    .replace(/[xX\u00D7]/g, "*")
-    .replace(/[:\u00F7]/g, "/")
-    .replace(/(\d),(\d)/g, "$1.$2")
-    .replace(/[^\d+\-*/().%^]/g, "")
-    .trim();
-}
-
-function formatExpressionForDisplay(input: string): string {
-  return input.replace(/\*/g, "x").replace(/\//g, ":");
-}
-
-function normalizeOcrOperators(input: string): string {
-  return input
-    .replace(/[‐‑‒–—−﹣_~]/g, "-")
-    .replace(/[＋﹢]/g, "+")
-    .replace(/[×✕✖＊⋅·•*]/g, "x")
-    .replace(/[÷／]/g, ":")
-    .replace(/([0-9)%])([tT†┼╋])(?=[0-9(])/g, "$1+")
-    .replace(/([0-9)%])([;])(?=[0-9(])/g, "$1:")
-    .replace(/([0-9)%])([xX])(?=[0-9(])/g, "$1x")
-    .replace(/([0-9)%])([:/])(?=[0-9(])/g, "$1:");
-}
-
-function normalizeOcrChunk(input: string): string {
-  const normalizedOperators = normalizeOcrOperators(input);
-  return normalizedOperators
-    .replace(/\s+/g, "")
-    .replace(/(\d),(\d)/g, "$1.$2")
-    .replace(/[^\d+\-x:().%^=]/g, "")
-    .replace(/\+{2,}/g, "+")
-    .replace(/x{2,}/g, "x")
-    .replace(/:{2,}/g, ":")
-    .trim();
-}
-
-function mergeRecognizedText(previous: string, nextChunk: string): string {
-  if (!nextChunk) {
-    return previous;
-  }
-  if (!previous) {
-    return nextChunk;
-  }
-  if (previous.endsWith(nextChunk)) {
-    return previous;
-  }
-  if (nextChunk.startsWith(previous)) {
-    return nextChunk;
-  }
-
-  const maxOverlap = Math.min(previous.length, nextChunk.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    if (previous.slice(-overlap) === nextChunk.slice(0, overlap)) {
-      return `${previous}${nextChunk.slice(overlap)}`;
-    }
-  }
-  return `${previous}${nextChunk}`;
-}
-
-function formatArchiveDateTime(timestamp: number): string {
-  return new Intl.DateTimeFormat("it-IT", {
-    dateStyle: "short",
-    timeStyle: "medium"
-  }).format(new Date(timestamp));
-}
-
-function buildDocumentBaseName(timestamp: number): string {
-  const date = new Date(timestamp);
-  const d = String(date.getDate()).padStart(2, "0");
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const h = String(date.getHours()).padStart(2, "0");
-  const min = String(date.getMinutes()).padStart(2, "0");
-  const s = String(date.getSeconds()).padStart(2, "0");
-  return `MA_${d}${m}_${h}${min}${s}`;
-}
-
-function normalizePageCanvasDataForPages(
-  pages: Page[],
-  input?: Record<string, string | null> | null,
-  legacyCanvasData?: string | null
-): PageCanvasDataMap {
-  const source = input ?? {};
-  return pages.reduce<PageCanvasDataMap>((acc, page, index) => {
-    const nextValue = source[page.id];
-    if (typeof nextValue === "string" || nextValue === null) {
-      acc[page.id] = nextValue;
-      return acc;
-    }
-    if (index === 0 && typeof legacyCanvasData === "string") {
-      acc[page.id] = legacyCanvasData;
-      return acc;
-    }
-    acc[page.id] = null;
-    return acc;
-  }, {});
-}
-
-function computeVirtualWindowRange(
-  scrollTop: number,
-  viewportHeight: number,
-  pageCount: number,
-  bufferSize: number
-): VirtualWindowRange {
-  if (pageCount <= 0) {
-    return { startIndex: 0, endIndex: -1 };
-  }
-  const step = PAGE_HEIGHT + PAGE_SEPARATOR_HEIGHT;
-  const firstVisible = Math.floor(Math.max(0, scrollTop) / step);
-  const lastVisible = Math.floor(Math.max(0, scrollTop + Math.max(1, viewportHeight) - 1) / step);
-  return {
-    startIndex: clamp(firstVisible - bufferSize, 0, pageCount - 1),
-    endIndex: clamp(lastVisible + bufferSize, 0, pageCount - 1)
-  };
-}
-
-function buildIndexRange(startIndex: number, endIndex: number): number[] {
-  if (endIndex < startIndex) {
-    return [];
-  }
-  return Array.from({ length: endIndex - startIndex + 1 }, (_unused, offset) => startIndex + offset);
-}
-
 function App() {
   const initialDocumentRef = useRef<PersistedDocument>(loadInitialDocument());
   const initialPageCanvasDataRef = useRef<PageCanvasDataMap>(
@@ -427,7 +305,7 @@ function App() {
   const [virtualWindowRange, setVirtualWindowRange] = useState<VirtualWindowRange>({ startIndex: 0, endIndex: 0 });
   const [intersectingPageIds, setIntersectingPageIds] = useState<string[]>([]);
   const [slotAssignments, setSlotAssignments] = useState<Array<string | null>>(
-    () => Array.from({ length: CANVAS_POOL_SIZE }, () => null)
+    () => Array.from({ length: 6 }, () => null) // CANVAS_POOL_SIZE
   );
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -498,6 +376,421 @@ function App() {
   const workerInitPromiseRef = useRef<Promise<OcrWorker> | null>(null);
   const penStrokeWidth = PEN_WIDTH_BY_LEVEL[penSizeLevel];
   const eraserStrokeWidth = ERASER_WIDTH_BY_LEVEL[eraserSizeLevel];
+
+  // 🆕 FUNZIONE PER INCOLLARE IMMAGINI DA CLIPBOARD
+  const pasteImageFromClipboard = useCallback(async (pageId: string | null) => {
+    if (!pageId) {
+      console.warn('⚠️ pasteImageFromClipboard: pageId is null');
+      return; // 🛡️ Early return se null
+    }
+    
+    console.log('🖼️ pasteImageFromClipboard called with pageId:', pageId);
+    
+    try {
+      console.log('📋 Reading clipboard...');
+      const clipboardItems = await navigator.clipboard.read();
+      console.log('📋 Clipboard items:', clipboardItems);
+      
+      for (const item of clipboardItems) {
+        console.log('🔍 Checking item types:', item.types);
+        for (const type of item.types) {
+          console.log('🔍 Checking type:', type);
+          if (type.startsWith('image/')) {
+            console.log('✅ Found image type:', type);
+            const blob = await item.getType(type);
+            console.log('📦 Blob created:', blob.size, 'bytes');
+            
+            // Converti blob in data URL invece di blob URL
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+              const dataUrl = event.target?.result as string;
+              console.log('🔗 Data URL created:', dataUrl.substring(0, 50) + '...');
+              
+              // Carica Fabric.js se non già caricato
+              if (!fabricModuleRef.current) {
+                console.log('📦 Loading Fabric.js...');
+                fabricModuleRef.current = await lazyImportFabric();
+              }
+              
+              const fabric = fabricModuleRef.current;
+              
+              // 🆕 APPROCCIO: Carica immagine in HTML Image poi converti in Fabric
+              console.log('🖼️ Loading HTML Image first...');
+              const htmlImg = new Image();
+              htmlImg.onload = () => {
+                console.log('🖼️ HTML Image loaded!', {
+                  width: htmlImg.width,
+                  height: htmlImg.height
+                });
+                
+                // Ora converti in Fabric Image
+                console.log('🎨 Converting HTML Image to Fabric Image...');
+                const fabricImg = new fabric.Image(htmlImg, {
+                  left: 200,
+                  top: 200,
+                  selectable: true,
+                  evented: true,
+                  visible: true,
+                  opacity: 1
+                });
+                
+                console.log('🎨 Fabric Image created from HTML!', fabricImg);
+                console.log('🎨 Image properties:', {
+                  width: fabricImg.width,
+                  height: fabricImg.height,
+                  left: fabricImg.left,
+                  top: fabricImg.top,
+                  visible: fabricImg.visible,
+                  opacity: fabricImg.opacity
+                });
+                
+                // 🛡️ Ottieni canvas direttamente senza usare getCanvasByPageId
+                const slot = pageSlotMapRef.current.get(pageId);
+                console.log('📍 Page slot:', slot);
+                console.log('📍 Available slots:', Array.from(pageSlotMapRef.current.entries()));
+                console.log('📍 Available canvases:', Array.from(fabricCanvasMapRef.current.entries()));
+                
+                const canvas = slot !== undefined ? fabricCanvasMapRef.current.get(slot) ?? null : null;
+                console.log('🎯 Canvas found:', !!canvas);
+                if (canvas) {
+                  console.log('🎯 Canvas details:', {
+                    width: canvas.width,
+                    height: canvas.height,
+                    objectCount: canvas.getObjects().length,
+                    backgroundColor: canvas.backgroundColor
+                  });
+                }
+                
+                if (!canvas) {
+                  console.warn('⚠️ No canvas found for page:', pageId);
+                  return;
+                }
+                
+                // Dimensioni massime per evitare immagini troppo grandi
+                const maxWidth = 600;
+                const maxHeight = 450;
+                
+                let width = fabricImg.width || 200;
+                let height = fabricImg.height || 150;
+                
+                console.log('📏 Original dimensions:', { width, height });
+                
+                // Scala se necessario
+                if (width > maxWidth || height > maxHeight) {
+                  const ratio = Math.min(maxWidth / width, maxHeight / height);
+                  width *= ratio;
+                  height *= ratio;
+                  console.log('📏 Scaled dimensions:', { width, height });
+                  
+                  // Applica scaling
+                  fabricImg.set({
+                    scaleX: width / (fabricImg.width || 1),
+                    scaleY: height / (fabricImg.height || 1)
+                  });
+                }
+                
+                console.log('⚙️ Final image properties:', {
+                  left: fabricImg.left,
+                  top: fabricImg.top,
+                  scaleX: fabricImg.scaleX,
+                  scaleY: fabricImg.scaleY,
+                  selectable: fabricImg.selectable,
+                  evented: fabricImg.evented,
+                  visible: fabricImg.visible,
+                  opacity: fabricImg.opacity
+                });
+                
+                // Aggiungi al canvas
+                console.log('➕ Adding image to canvas...');
+                canvas.add(fabricImg);
+                console.log('📊 Canvas objects after add:', canvas.getObjects().length);
+                
+                // Imposta come oggetto attivo
+                canvas.setActiveObject(fabricImg);
+                console.log('🎯 Image set as active');
+                
+                // Renderizza
+                console.log('🎨 Rendering canvas...');
+                canvas.renderAll();
+                console.log('✅ Canvas rendered!');
+                
+                // Verifica finale
+                const finalObjects = canvas.getObjects();
+                const addedImage = finalObjects[finalObjects.length - 1];
+                console.log('🔍 Final verification:', {
+                  totalObjects: finalObjects.length,
+                  lastObject: addedImage,
+                  isImage: addedImage?.type === 'image',
+                  imageVisible: addedImage?.visible,
+                  imagePosition: { left: addedImage?.left, top: addedImage?.top }
+                });
+                
+                console.log('🖼️ Immagine incollata con successo:', { width, height });
+              };
+              
+              htmlImg.onerror = (error) => {
+                console.error('❌ HTML Image load ERROR:', error);
+              };
+              
+              htmlImg.src = dataUrl;
+            };
+            reader.readAsDataURL(blob);
+            
+            return; // Esci dopo aver processato la prima immagine
+          }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Errore incollaggio immagine:', error);
+      // Prova fallback per browser meno recenti
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text.startsWith('data:image')) {
+          // È un data URL di immagine
+          const img = new Image();
+          img.onload = () => {
+            console.log('📋 Data URL immagine rilevato:', text.substring(0, 50) + '...');
+          };
+          img.src = text;
+        }
+      } catch (fallbackError) {
+        console.warn('⚠️ Fallback incollaggio fallito:', fallbackError);
+      }
+    }
+  }, []); // 🛡️ Rimuovi dipendenza getCanvasByPageId per evitare hoisting
+
+  // 🆕 EVENT LISTENER GLOBALE PER PASTE
+  useEffect(() => {
+    const handlePaste = async (e: ClipboardEvent) => {
+      console.log('🎯 GLOBAL paste event triggered!', e);
+      console.log('🎯 Event details:', {
+        defaultPrevented: e.defaultPrevented,
+        clipboardData: !!e.clipboardData,
+        items: e.clipboardData?.items?.length || 0
+      });
+      
+      // Non preveniamo default per ora, per debug
+      // e.preventDefault();
+      
+      const currentPageId = pages[currentPageIndex]?.id ?? null;
+      console.log('📍 Current page ID:', currentPageId);
+      if (currentPageId) {
+        console.log('🚀 Calling pasteImageFromClipboard...');
+        
+        // 🛡️ PROVA CLIPBOARD API PRIMA
+        try {
+          await pasteImageFromClipboard(currentPageId);
+          return;
+        } catch (clipboardError) {
+          console.warn('⚠️ Clipboard API failed, trying fallback...', clipboardError);
+        }
+        
+        // 🔄 FALLBACK: Prova a leggere da e.clipboardData
+        try {
+          const items = e.clipboardData?.items;
+          if (items) {
+            console.log('🔄 Trying clipboardData.items fallback:', items.length);
+            for (let i = 0; i < items.length; i++) {
+              const item = items[i];
+              console.log('🔍 Fallback item:', item.type);
+              if (item.type.startsWith('image/')) {
+                console.log('✅ Fallback found image:', item.type);
+                const file = item.getAsFile();
+                if (file) {
+                  console.log('📦 Fallback file:', file.size, 'bytes');
+                  
+                  // Converti file in URL
+                  const reader = new FileReader();
+                  reader.onload = async (event) => {
+                    const dataUrl = event.target?.result as string;
+                    console.log('🔗 Fallback data URL created:', dataUrl.substring(0, 50) + '...');
+                    
+                    // Carica Fabric.js se non già caricato
+                    if (!fabricModuleRef.current) {
+                      console.log('📦 Loading Fabric.js for fallback...');
+                      fabricModuleRef.current = await lazyImportFabric();
+                    }
+                    
+                    const fabric = fabricModuleRef.current;
+                    
+                    // Crea immagine Fabric.js da data URL
+                    fabric.Image.fromURL(dataUrl, {
+                      crossOrigin: 'anonymous'
+                    } as any, (img: any) => {
+                      console.log('🎨 Fallback Fabric image created:', img);
+                      
+                      // 🛡️ Ottieni canvas direttamente
+                      const slot = pageSlotMapRef.current.get(currentPageId);
+                      console.log('📍 Fallback page slot:', slot);
+                      const canvas = slot !== undefined ? fabricCanvasMapRef.current.get(slot) ?? null : null;
+                      console.log('🎯 Fallback canvas found:', !!canvas);
+                      if (!canvas) {
+                        console.warn('⚠️ No canvas found for page:', currentPageId);
+                        return;
+                      }
+                      
+                      // Dimensioni massime
+                      const maxWidth = 400;
+                      const maxHeight = 300;
+                      
+                      let width = img.width || 200;
+                      let height = img.height || 150;
+                      
+                      console.log('📏 Fallback original dimensions:', { width, height });
+                      
+                      // Scala se necessario
+                      if (width > maxWidth || height > maxHeight) {
+                        const ratio = Math.min(maxWidth / width, maxHeight / height);
+                        width *= ratio;
+                        height *= ratio;
+                        console.log('📏 Fallback scaled dimensions:', { width, height });
+                      }
+                      
+                      // Imposta dimensioni e posizione
+                      img.set({
+                        left: 50,
+                        top: 50,
+                        scaleX: width / (img.width || 1),
+                        scaleY: height / (img.height || 1),
+                        selectable: true,
+                        evented: true
+                      });
+                      
+                      console.log('⚙️ Fallback image properties set');
+                      
+                      // Aggiungi al canvas
+                      canvas.add(img);
+                      canvas.setActiveObject(img);
+                      canvas.renderAll();
+                      
+                      console.log('✅ Fallback image added to canvas!');
+                    });
+                  };
+                  reader.readAsDataURL(file);
+                  return;
+                }
+              }
+            }
+          }
+        } catch (fallbackError) {
+          console.error('❌ All paste methods failed:', fallbackError);
+        }
+      } else {
+        console.warn('⚠️ No current page ID found');
+      }
+    };
+
+    // 🆕 CONTEXT MENU PER DEBUG CLIPBOARD
+    const handleContextMenu = async (e: MouseEvent) => {
+      console.log('🖱️ Context menu triggered!', e);
+      
+      // Mostra menu di debug
+      e.preventDefault();
+      
+      const currentPageId = pages[currentPageIndex]?.id ?? null;
+      console.log('📍 Current page ID for context menu:', currentPageId);
+      
+      // Crea menu di debug
+      const debugMenu = document.createElement('div');
+      debugMenu.style.cssText = `
+        position: fixed;
+        top: ${e.clientY}px;
+        left: ${e.clientX}px;
+        background: white;
+        border: 2px solid #333;
+        border-radius: 8px;
+        padding: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        z-index: 10000;
+        font-family: monospace;
+        font-size: 12px;
+      `;
+      
+      debugMenu.innerHTML = `
+        <div style="margin-bottom: 8px; font-weight: bold;">🔍 Debug Clipboard</div>
+        <button id="check-clipboard" style="display: block; width: 100%; margin: 4px 0; padding: 4px 8px; cursor: pointer;">📋 Check Clipboard</button>
+        <button id="paste-image" style="display: block; width: 100%; margin: 4px 0; padding: 4px 8px; cursor: pointer;">🖼️ Paste Image</button>
+        <button id="close-menu" style="display: block; width: 100%; margin: 4px 0; padding: 4px 8px; cursor: pointer; background: #f44336; color: white;">❌ Close</button>
+      `;
+      
+      document.body.appendChild(debugMenu);
+      
+      // Event handlers per i button
+      const checkBtn = debugMenu.querySelector('#check-clipboard') as HTMLButtonElement;
+      const pasteBtn = debugMenu.querySelector('#paste-image') as HTMLButtonElement;
+      const closeBtn = debugMenu.querySelector('#close-menu') as HTMLButtonElement;
+      
+      checkBtn.onclick = async () => {
+        console.log('🔍 Checking clipboard contents...');
+        try {
+          const clipboardItems = await navigator.clipboard.read();
+          console.log('📋 Clipboard items found:', clipboardItems.length);
+          for (const item of clipboardItems) {
+            console.log('🔍 Item types:', item.types);
+            for (const type of item.types) {
+              console.log('📄 Type:', type);
+              if (type.startsWith('image/')) {
+                console.log('✅ Image found in clipboard!');
+                alert('✅ Immagine trovata negli appunti!');
+              }
+            }
+          }
+          if (clipboardItems.length === 0) {
+            console.log('⚠️ Clipboard is empty');
+            alert('⚠️ Appunti vuoti o non accessibili');
+          }
+        } catch (error) {
+          console.error('❌ Error checking clipboard:', error);
+          alert('❌ Errore: ' + error.message);
+        }
+      };
+      
+      pasteBtn.onclick = async () => {
+        console.log('🖼️ Manual paste from context menu...');
+        if (currentPageId) {
+          await pasteImageFromClipboard(currentPageId);
+        }
+        document.body.removeChild(debugMenu);
+      };
+      
+      closeBtn.onclick = () => {
+        document.body.removeChild(debugMenu);
+      };
+      
+      // Chiudi menu cliccando fuori
+      const closeOnOutsideClick = (e: MouseEvent) => {
+        if (debugMenu && debugMenu.contains(e.target as Node)) {
+          return; // Click sul menu, non chiudere
+        }
+        if (debugMenu && document.body.contains(debugMenu)) {
+          try {
+            document.body.removeChild(debugMenu);
+          } catch (error) {
+            console.warn('⚠️ Menu already removed:', error);
+          }
+        }
+        document.removeEventListener('click', closeOnOutsideClick);
+      };
+      setTimeout(() => {
+        document.addEventListener('click', closeOnOutsideClick);
+      }, 100);
+    };
+
+    // Aggiungi event listener globale con capture
+    document.addEventListener('paste', handlePaste, true);
+    document.addEventListener('contextmenu', handleContextMenu, true);
+    
+    console.log('📡 Global paste listener attached (capture mode)');
+    console.log('🖱️ Context menu listener attached (debug mode)');
+
+    // Cleanup
+    return () => {
+      document.removeEventListener('paste', handlePaste, true);
+      document.removeEventListener('contextmenu', handleContextMenu, true);
+      console.log('📡 Global paste listener removed (capture mode)');
+      console.log('🖱️ Context menu listener removed (debug mode)');
+    };
+  }, [pages, currentPageIndex, pasteImageFromClipboard]);
 
   const filteredArchiveEntries = useMemo(() => {
     const query = archiveSearch.trim().toLocaleLowerCase("it-IT");
@@ -1915,18 +2208,79 @@ function App() {
       pages: [firstPage],
       canvasData: null,
       pageCanvasData: emptyPageCanvasData,
-      journalEntries: journalEntriesRef.current
+      journal: journalRef.current,
     };
-    await applyPersistedDocument(nextDocument);
-    persistDocument(nextDocument.pages, emptyPageCanvasData);
+    persistDocument(nextDocument.pages, nextDocument.pageCanvasData);
     lastOcrChunkRef.current = "";
     autoOcrRectRef.current = null;
     clearAutoOcrScheduleRef.current();
     currentPageIndexRef.current = 0;
     setCurrentPageIndex(0);
     historyStacksRef.current = {};
-    containerRef.current?.scrollTo({ top: 0, behavior: "auto" });
-  }, [applyPersistedDocument, persistDocument]);
+    toolRef.current = "pen";
+    setTool("pen");
+    setIsSelectionMode(false);
+    setIsOcrRunning(false);
+    setOcrStatus("");
+  }, [persistDocument]);
+
+  // 🆕 FUNZIONE CANCELLA INTELLIGENTE
+  const deleteSelectedObjects = useCallback(() => {
+    const currentPageId = pages[currentPageIndex]?.id;
+    if (!currentPageId) return;
+    
+    const canvas = getCanvasByPageId(currentPageId);
+    if (!canvas) return;
+    
+    // Controlla se ci sono oggetti selezionati
+    const activeObject = canvas.getActiveObject();
+    const selectedObjects = selectedObjectsRef.current;
+    
+    if (activeObject || selectedObjects.size > 0) {
+      // Ci sono oggetti selezionati → cancella solo quelli
+      console.log('🗑️ Deleting selected objects...');
+      
+      // Raccogli tutti gli oggetti da cancellare
+      const objectsToDelete: any[] = [];
+      
+      if (activeObject) {
+        if (activeObject.type === 'activeSelection') {
+          // È una selezione multipla
+          objectsToDelete.push(...(activeObject as any)._objects);
+        } else {
+          // È un oggetto singolo
+          objectsToDelete.push(activeObject);
+        }
+      }
+      
+      // Aggiungi oggetti dalla selezione multipla (se presenti)
+      selectedObjects.forEach(obj => {
+        if (!objectsToDelete.includes(obj)) {
+          objectsToDelete.push(obj);
+        }
+      });
+      
+      console.log(`🗑️ Deleting ${objectsToDelete.length} objects`);
+      
+      // Rimuovi gli oggetti dal canvas
+      objectsToDelete.forEach(obj => {
+        canvas.remove(obj);
+      });
+      
+      // Pulisci le selezioni
+      canvas.discardActiveObject();
+      selectedObjectsRef.current.clear();
+      
+      // Renderizza
+      canvas.renderAll();
+      
+      console.log('✅ Selected objects deleted successfully');
+    } else {
+      // Nessun oggetto selezionato → comportamento esistente
+      console.log('🗑️ No objects selected, using clearAllPages...');
+      void clearAllPages();
+    }
+  }, [pages, currentPageIndex, getCanvasByPageId, clearAllPages]);
 
   const createNewDocument = useCallback(async () => {
     if (!window.confirm("Creare un nuovo documento vuoto?")) {
@@ -2395,9 +2749,9 @@ function App() {
         };
       });
 
-      // Se la data è stata aggiornata O se è stata attivata la linea di chiusura, 
+      // Se la data è stata aggiornata O se è stata attivata la linea di chiusura O se è stato inserito importo, 
       // copia alla riga successiva se vuota
-      if (patch.date || patch.closeLine) {
+      if (patch.date || patch.closeLine || patch.debit || patch.credit) {
         const currentIndex = updated.findIndex(entry => entry.id === entryId);
         const nextIndex = currentIndex + 1;
         
@@ -2436,43 +2790,78 @@ function App() {
       const now = Date.now();
       const datePart = new Date(now).toISOString().slice(0, 10);
       const pdfBaseName = buildDocumentBaseName(now);
-      const [pdfBlob, xlsxBlob] = await Promise.all([
-        buildPdfBlob(),
-        buildJournalWorkbookBlob(datePart)
-      ]);
-
+      
+      // Genera PDF
+      const pdfBlob = await buildPdfBlob();
+      
       if (!pdfBlob) {
         window.alert("Condivisione non disponibile: impossibile generare il PDF.");
         return;
       }
 
       const pdfFile = new File([pdfBlob], `${pdfBaseName}.pdf`, { type: "application/pdf" });
-      const xlsxFile = new File([xlsxBlob], `giornale_data_${datePart}.xlsx`, {
-        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      });
+      
+      // 🚨 FIX TEMPORANEO: Salta XLSX se backend non disponibile
+      let xlsxBlob: Blob | null = null;
+      let xlsxFile: File | null = null;
+      
+      try {
+        xlsxBlob = await buildJournalWorkbookBlob(datePart);
+        xlsxFile = new File([xlsxBlob], `giornale_data_${datePart}.xlsx`, {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        });
+      } catch (error) {
+        console.warn("⚠️ Backend XLSX non disponibile, procedo solo con PDF:", error);
+      }
 
       const nav = navigator as Navigator & {
         canShare?: (data: ShareData) => boolean;
       };
-      const files = [pdfFile, xlsxFile];
+      
+      // Condividi solo PDF o entrambi i file
+      const files = xlsxFile ? [pdfFile, xlsxFile] : [pdfFile];
       const canShareFiles =
         typeof nav.canShare === "function" ? nav.canShare({ files }) : true;
 
       if (typeof nav.share === "function" && canShareFiles) {
-        await nav.share({
-          title: "MYAccounting",
-          text: "Lavagna PDF + giornale_data XLSX",
-          files
-        });
-        return;
+        try {
+          await nav.share({
+            title: "MYAccounting",
+            text: xlsxFile ? "Lavagna PDF + giornale_data XLSX" : "Lavagna PDF",
+            files
+          });
+          return; // Successo, esci dalla funzione
+        } catch (shareError) {
+          console.warn("⚠️ Web Share API fallita, procedo con download:", shareError);
+          
+          // Se è Permission denied, mostra messaggio specifico
+          if (shareError instanceof Error && shareError.name === 'NotAllowedError') {
+            window.alert("Permessi di condivisione negati. Scarico i file direttamente.");
+          } else {
+            window.alert("Condivisione nativa non disponibile. Scarico i file direttamente.");
+          }
+          
+          // Procedi con download fallback
+          downloadBlob(pdfBlob, pdfFile.name);
+          if (xlsxFile && xlsxBlob) {
+            downloadBlob(xlsxBlob, xlsxFile.name);
+          }
+          return;
+        }
       }
 
+      // Fallback download diretto
       downloadBlob(pdfBlob, pdfFile.name);
-      downloadBlob(xlsxBlob, xlsxFile.name);
-      window.alert(
-        "Condivisione nativa non disponibile su questo dispositivo. Ho scaricato i due file separati."
-      );
-    } catch {
+      if (xlsxFile && xlsxBlob) {
+        downloadBlob(xlsxBlob, xlsxFile.name);
+      }
+      
+      const message = xlsxFile 
+        ? "Condivisione nativa non disponibile su questo dispositivo. Ho scaricato i due file separati."
+        : "Condivisione nativa non disponibile su questo dispositivo. Ho scaricato il PDF.";
+      window.alert(message);
+    } catch (error) {
+      console.error("❌ Errore condivisione:", error);
       window.alert("Condivisione non riuscita. Verifica API e riprova.");
     } finally {
       setIsSharingFiles(false);
@@ -4110,13 +4499,35 @@ function App() {
         </button>
         <button
           className="icon-button"
-          title="Incolla oggetto"
-          aria-label="Incolla oggetto"
+          title="Incolla immagine da clipboard"
+          aria-label="Incolla immagine da clipboard"
           type="button"
-          onClick={() => void pasteCanvasSelection()}
+          onClick={async () => {
+            console.log('🎯 MANUAL paste button clicked!');
+            const currentPageId = pages[currentPageIndex]?.id ?? null;
+            console.log('📍 Current page ID:', currentPageId);
+            if (currentPageId) {
+              console.log('🚀 Calling pasteImageFromClipboard manually...');
+              await pasteImageFromClipboard(currentPageId);
+            } else {
+              console.warn('⚠️ No current page ID found');
+            }
+          }}
+          onPaste={async (e) => {
+            console.log('🎯 BUTTON paste event triggered!', e);
+            e.preventDefault();
+            const currentPageId = pages[currentPageIndex]?.id ?? null;
+            console.log('📍 Current page ID:', currentPageId);
+            if (currentPageId) {
+              console.log('🚀 Calling pasteImageFromClipboard...');
+              await pasteImageFromClipboard(currentPageId);
+            } else {
+              console.warn('⚠️ No current page ID found');
+            }
+          }}
         >
           <i className="fa-solid fa-paste" />
-          <span className="sr-only">Incolla oggetto</span>
+          <span className="sr-only">Incolla immagine da clipboard</span>
         </button>
         <button className="icon-button" title="Redo" aria-label="Redo" type="button" onClick={() => void redo()}>
           <i className="fa-solid fa-rotate-right" />
@@ -4219,13 +4630,13 @@ function App() {
         </button>
         <button
           className="icon-button"
-          title="Cancella dati"
-          aria-label="Cancella dati"
+          title="Cancella oggetti selezionati"
+          aria-label="Cancella oggetti selezionati"
           type="button"
-          onClick={() => void clearAllPages()}
+          onClick={() => void deleteSelectedObjects()}
         >
           <i className="fa-solid fa-trash" />
-          <span className="sr-only">Cancella dati</span>
+          <span className="sr-only">Cancella oggetti selezionati</span>
         </button>
         <span className="toolbar-status">
           {ocrStatus} | Pagina {currentPageIndex + 1} di {pages.length}
