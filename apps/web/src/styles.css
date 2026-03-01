@@ -610,6 +610,22 @@ button:disabled {
   font-family: Verdana, Geneva, Tahoma, sans-serif;
   font-size: 15px;
   font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.journal-amount-cell input:hover {
+  background-color: #f0f9ff;
+  outline: 2px solid #3b82f6;
+  outline-offset: -1px;
+  border-radius: 4px;
+}
+
+.journal-amount-cell input:focus {
+  background-color: #f0f9ff;
+  outline: 2px solid #3b82f6;
+  outline-offset: -1px;
+  border-radius: 4px;
 }
 
 .journal-remove-cell {
@@ -985,7 +1001,7 @@ button:disabled {
   padding: 10px;
   background: #ffffff;
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.16);
-  z-index: 40;
+  z-index: 200;
 }
 
 .calculator header {

@@ -24,6 +24,7 @@ type JournalPanelProps = {
   onClearEntries: () => void;
   onRemoveEntry: (entryId: string) => void;
   onUpdateEntry: (entryId: string, patch: Partial<JournalEntry>) => void;
+  onAmountClick?: (amount: string) => void;
 };
 
 type AccountPickerProps = {
@@ -243,8 +244,17 @@ export function JournalPanel({
   onAddEntry,
   onClearEntries,
   onRemoveEntry,
-  onUpdateEntry
+  onUpdateEntry,
+  onAmountClick
 }: JournalPanelProps) {
+  const handleAmountClick = (amount: string) => {
+    if (onAmountClick && amount) {
+      // Converti l'importo in formato calcolatrice (sostituisci virgola con punto)
+      const calculatorAmount = amount.replace(/\./g, '').replace(',', '.');
+      onAmountClick(calculatorAmount);
+    }
+  };
+
   if (!isOpen) {
     return null;
   }
@@ -290,6 +300,12 @@ export function JournalPanel({
                         onUpdateEntry(entry.id, { date: '' });
                       }
                     }}
+                    onBlur={() => {
+                      // Forza il re-render per assicurare che il valore sia sincronizzato
+                      if (entry.date) {
+                        onUpdateEntry(entry.id, { date: entry.date });
+                      }
+                    }}
                     placeholder="gg/mm"
                     maxLength={5}
                     style={{ paddingRight: '30px' }}
@@ -311,10 +327,24 @@ export function JournalPanel({
                         dateInput.style.opacity = '1';
                         dateInput.style.pointerEvents = 'auto';
                         dateInput.showPicker();
-                        dateInput.addEventListener('change', () => {
+                        
+                        // Gestisci sia change che input events
+                        const handleDateChange = () => {
                           dateInput.style.opacity = '0';
                           dateInput.style.pointerEvents = 'none';
-                        }, { once: true });
+                          // Forza un re-render del componente
+                          onUpdateEntry(entry.id, { date: dateInput.value });
+                        };
+                        
+                        dateInput.addEventListener('change', handleDateChange, { once: true });
+                        dateInput.addEventListener('input', handleDateChange, { once: true });
+                        
+                        // Fallback: chiudi dopo un ritardo
+                        setTimeout(() => {
+                          if (dateInput.style.opacity === '1') {
+                            handleDateChange();
+                          }
+                        }, 100);
                       }
                     }}
                     style={{ 
@@ -362,7 +392,10 @@ export function JournalPanel({
                     onBlur={() => {
                       onUpdateEntry(entry.id, { debit: formatAmountForDisplay(entry.debit) });
                     }}
+                    onDoubleClick={() => handleAmountClick(entry.debit)}
                     placeholder="0,00"
+                    title="Doppio click per inserire nella calcolatrice"
+                    style={{ cursor: 'pointer' }}
                   />
                 </td>
                 <td className="journal-amount-cell">
@@ -375,7 +408,10 @@ export function JournalPanel({
                     onBlur={() => {
                       onUpdateEntry(entry.id, { credit: formatAmountForDisplay(entry.credit) });
                     }}
+                    onDoubleClick={() => handleAmountClick(entry.credit)}
                     placeholder="0,00"
+                    title="Doppio click per inserire nella calcolatrice"
+                    style={{ cursor: 'pointer' }}
                   />
                 </td>
                 <td className="journal-remove-cell">
