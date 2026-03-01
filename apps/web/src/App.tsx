@@ -3,9 +3,9 @@ import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
 import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
-import { normalizeExpression, formatExpressionForDisplay, normalizeOcrChunk } from "./utils/ocrUtils";
+import { normalizeExpression, formatExpressionForDisplay, normalizeOcrChunk, validateExpression, evaluateExpressionNative } from "./utils/ocrUtils";
 import { mergeRecognizedText, formatArchiveDateTime, buildDocumentBaseName, normalizePageCanvasDataForPages, computeVirtualWindowRange, buildIndexRange } from "./utils/appUtils";
-import { useMathRecognition } from './features/math-recognition';
+// import { useMathRecognition } from './features/math-recognition';
 import {
   archiveBoardDocument,
   deleteArchivedBoardDocument,
@@ -295,8 +295,8 @@ function App() {
   const [isArchiveLoading, setIsArchiveLoading] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState("");
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
-  const [useMathRec, setUseMathRec] = useState(false);
-  const mathRec = useMathRecognition();
+  // const [useMathRec, setUseMathRec] = useState(false);
+  // const mathRec = useMathRecognition();
   const [isSharingFiles, setIsSharingFiles] = useState(false);
   const [isPdfExporting, setIsPdfExporting] = useState(false);  // 🎯 Loading per PDF
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
@@ -2871,6 +2871,20 @@ function App() {
     }
   }, [buildJournalWorkbookBlob, buildPdfBlob, downloadBlob]);
 
+  const handleJournalAmountClick = useCallback((amount: string) => {
+    // Inserisci l'importo nella calcolatrice
+    setDisplay((previous) => {
+      // Se c' già un'operazione, aggiungi l'importo
+      if (previous && !previous.includes('=')) {
+        return `${previous}+${amount}`;
+      }
+      return amount;
+    });
+    
+    // Apri la calcolatrice se non è già aperta
+    setIsCalculatorOpen(true);
+  }, []);
+
   const appendDisplay = useCallback((value: string) => {
     setDisplay((previous) => `${previous}${value}`);
   }, []);
@@ -2879,27 +2893,57 @@ function App() {
     async (rawInput: string, fromOcr = false): Promise<boolean> => {
       const leftSide = rawInput.includes("=") ? rawInput.split("=")[0] ?? "" : rawInput;
       const expression = normalizeExpression(leftSide);
-      if (!expression) {
+      
+      // Validazione migliorata
+      const validation = validateExpression(expression);
+      if (!validation.valid) {
+        const errorMsg = validation.error || "Espressione non valida";
+        if (fromOcr) {
+          setOcrStatus(`OCR: ${errorMsg}`);
+        } else {
+          setOcrStatus(errorMsg);
+          // Non mostrare alert per errori comuni
+          if (!errorMsg.includes("vuota") && !errorMsg.includes("consecutivi")) {
+            // Mostra tooltip solo per errori gravi
+            console.log(`⚠️ ${errorMsg}`);
+          }
+        }
         return false;
       }
 
+      let result: number;
+      let usedNative = false;
+
       try {
+        // Prova prima con mathjs
         const { evaluate } = await lazyImportMathJS();
-        const result = evaluate(expression);
-        const resolved = `${formatExpressionForDisplay(expression)}=${result}`;
-        setDisplay(resolved);
-        if (fromOcr) {
-          setOcrStatus(`OCR ok: ${resolved}`);
-        }
-        return true;
-      } catch {
-        if (fromOcr) {
-          setOcrStatus("OCR: espressione non valida");
+        result = evaluate(expression);
+      } catch (error) {
+        // Fallback alla calcolatrice nativa
+        console.log("🔄 MathJS fallito, uso calcolatrice nativa:", error);
+        try {
+          result = evaluateExpressionNative(expression);
+          usedNative = true;
+        } catch (nativeError) {
+          const errorMsg = `Errore calcolo: ${nativeError instanceof Error ? nativeError.message : 'sconosciuto'}`;
+          if (fromOcr) {
+            setOcrStatus(`OCR: ${errorMsg}`);
+          } else {
+            setOcrStatus(errorMsg);
+            console.log(`❌ ${errorMsg}`);
+          }
           return false;
         }
-        window.alert("Espressione non valida");
-        return false;
       }
+
+      const resolved = `${formatExpressionForDisplay(expression)}=${result}`;
+      setDisplay(resolved);
+      if (fromOcr) {
+        setOcrStatus(`OCR ok: ${resolved}${usedNative ? ' (nativo)' : ''}`);
+      } else {
+        setOcrStatus(`✅ ${resolved}${usedNative ? ' (nativo)' : ''}`);
+      }
+      return true;
     },
     []
   );
@@ -3104,49 +3148,49 @@ function App() {
         multiplier: 2
       });
 
-      // NEW: Try Math Recognition first
-      if (useMathRec && mathRec.isReady) {
-        try {
-          console.log('🧠 Using Math Recognition...');
-          const tempCanvas = document.createElement('canvas');
-          tempCanvas.width = rect.width;
-          tempCanvas.height = rect.height;
-          const tempCtx = tempCanvas.getContext('2d')!;
-          const img = new Image();
-          img.onload = async () => {
-            tempCtx.drawImage(img, 0, 0);
-            const result = await mathRec.recognize(tempCanvas);
-            
-            // Handle delete gesture
-            if (result.expression === 'DELETE') {
-              console.log('🗑️ Delete gesture detected');
-              const activeObject = canvas.getActiveObject();
-              if (activeObject) {
-                canvas.remove(activeObject);
-                canvas.requestRenderAll();
-              }
-              setIsOcrRunning(false);
-              setOcrStatus("Cancellato");
-              isAutoOcrBusyRef.current = false;
-              return;
-            }
-            
-            if (result.expression) {
-              setDisplay(result.expression);
-              setOcrStatus(`Math: ${(result.confidence * 100).toFixed(0)}%`);
-              console.log(`✅ Math recognized: "${result.expression}" (${(result.confidence * 100).toFixed(0)}% confidence)`);
-              setIsOcrRunning(false);
-              isAutoOcrBusyRef.current = false;
-              return;
-            }
-          };
-          img.src = imageData;
-          return;
-        } catch (error) {
-          console.error('❌ Math recognition failed, fallback to Tesseract:', error);
-          // Continue to Tesseract below
-        }
-      }
+      // NEW: Try Math Recognition first (DISABLED)
+      // if (useMathRec && mathRec.isReady) {
+      //   try {
+      //     console.log('🧠 Using Math Recognition...');
+      //     const tempCanvas = document.createElement('canvas');
+      //     tempCanvas.width = rect.width;
+      //     tempCanvas.height = rect.height;
+      //     const tempCtx = tempCanvas.getContext('2d')!;
+      //     const img = new Image();
+      //     img.onload = async () => {
+      //       tempCtx.drawImage(img, 0, 0);
+      //       const result = await mathRec.recognize(tempCanvas);
+      //       
+      //       // Handle delete gesture
+      //       if (result.expression === 'DELETE') {
+      //         console.log('🗑️ Delete gesture detected');
+      //         const activeObject = canvas.getActiveObject();
+      //         if (activeObject) {
+      //           canvas.remove(activeObject);
+      //           canvas.requestRenderAll();
+      //         }
+      //         setIsOcrRunning(false);
+      //         setOcrStatus("Cancellato");
+      //         isAutoOcrBusyRef.current = false;
+      //         return;
+      //       }
+      //       
+      //       if (result.expression) {
+      //         setDisplay(result.expression);
+      //         setOcrStatus(`Math: ${(result.confidence * 100).toFixed(0)}%`);
+      //         console.log(`✅ Math recognized: "${result.expression}" (${(result.confidence * 100).toFixed(0)}% confidence)`);
+      //         setIsOcrRunning(false);
+      //         isAutoOcrBusyRef.current = false;
+      //         return;
+      //       }
+      //     };
+      //     img.src = imageData;
+      //     return;
+      //   } catch (error) {
+      //     console.error('❌ Math recognition failed, fallback to Tesseract:', error);
+      //     // Continue to Tesseract below
+      //   }
+      // }
 
       // EXISTING: Tesseract logic (unchanged)
       const worker = await getWorker();
@@ -4685,7 +4729,8 @@ function App() {
           <i className="fa-solid fa-trash" />
           <span className="sr-only">Cancella oggetti selezionati</span>
         </button>
-        <button
+        {/* Math Recognition button - DISABLED */}
+        {/* <button
           className={`icon-button ${useMathRec ? 'active' : ''}`}
           onClick={() => setUseMathRec(!useMathRec)}
           title={useMathRec ? 'Math Recognition ON' : 'Math Recognition OFF'}
@@ -4697,7 +4742,7 @@ function App() {
           <span className="sr-only">
             {useMathRec ? 'Math Recognition ON' : 'Math Recognition OFF'}
           </span>
-        </button>
+        </button> */}
         <span className="toolbar-status">
           {ocrStatus} | Pagina {currentPageIndex + 1} di {pages.length}
         </span>
@@ -4715,6 +4760,7 @@ function App() {
         onClearEntries={clearJournalEntries}
         onRemoveEntry={removeJournalEntry}
         onUpdateEntry={updateJournalEntry}
+        onAmountClick={handleJournalAmountClick}
       />
 
       {isArchiveOpen && (
