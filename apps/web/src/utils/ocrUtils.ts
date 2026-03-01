@@ -2,7 +2,7 @@
 // Queste funzioni sono pure e testabili
 
 // Calcolatrice nativa come fallback per mathjs
-export function evaluateExpressionNative(expression: string): number | string {
+export function evaluateExpressionNative(expression: string): number {
   try {
     // Funzione sicura per valutare espressioni matematiche
     // Rimuovi caratteri non sicuri
