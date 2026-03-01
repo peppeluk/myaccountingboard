@@ -299,6 +299,7 @@ function App() {
   // const mathRec = useMathRecognition();
   const [isSharingFiles, setIsSharingFiles] = useState(false);
   const [isPdfExporting, setIsPdfExporting] = useState(false);  // 🎯 Loading per PDF
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
     () => initialDocumentRef.current.journalEntries
   );
@@ -683,115 +684,15 @@ function App() {
       }
     };
 
-    // 🆕 CONTEXT MENU PER DEBUG CLIPBOARD
-    const handleContextMenu = async (e: MouseEvent) => {
-      console.log('🖱️ Context menu triggered!', e);
-      
-      // Mostra menu di debug
-      e.preventDefault();
-      
-      const currentPageId = pages[currentPageIndex]?.id ?? null;
-      console.log('📍 Current page ID for context menu:', currentPageId);
-      
-      // Crea menu di debug
-      const debugMenu = document.createElement('div');
-      debugMenu.style.cssText = `
-        position: fixed;
-        top: ${e.clientY}px;
-        left: ${e.clientX}px;
-        background: white;
-        border: 2px solid #333;
-        border-radius: 8px;
-        padding: 10px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        z-index: 10000;
-        font-family: monospace;
-        font-size: 12px;
-      `;
-      
-      debugMenu.innerHTML = `
-        <div style="margin-bottom: 8px; font-weight: bold;">🔍 Debug Clipboard</div>
-        <button id="check-clipboard" style="display: block; width: 100%; margin: 4px 0; padding: 4px 8px; cursor: pointer;">📋 Check Clipboard</button>
-        <button id="paste-image" style="display: block; width: 100%; margin: 4px 0; padding: 4px 8px; cursor: pointer;">🖼️ Paste Image</button>
-        <button id="close-menu" style="display: block; width: 100%; margin: 4px 0; padding: 4px 8px; cursor: pointer; background: #f44336; color: white;">❌ Close</button>
-      `;
-      
-      document.body.appendChild(debugMenu);
-      
-      // Event handlers per i button
-      const checkBtn = debugMenu.querySelector('#check-clipboard') as HTMLButtonElement;
-      const pasteBtn = debugMenu.querySelector('#paste-image') as HTMLButtonElement;
-      const closeBtn = debugMenu.querySelector('#close-menu') as HTMLButtonElement;
-      
-      checkBtn.onclick = async () => {
-        console.log('🔍 Checking clipboard contents...');
-        try {
-          const clipboardItems = await navigator.clipboard.read();
-          console.log('📋 Clipboard items found:', clipboardItems.length);
-          for (const item of clipboardItems) {
-            console.log('🔍 Item types:', item.types);
-            for (const type of item.types) {
-              console.log('📄 Type:', type);
-              if (type.startsWith('image/')) {
-                console.log('✅ Image found in clipboard!');
-                alert('✅ Immagine trovata negli appunti!');
-              }
-            }
-          }
-          if (clipboardItems.length === 0) {
-            console.log('⚠️ Clipboard is empty');
-            alert('⚠️ Appunti vuoti o non accessibili');
-          }
-        } catch (error) {
-          console.error('❌ Error checking clipboard:', error);
-          alert('❌ Errore: ' + (error as Error).message);
-        }
-      };
-      
-      pasteBtn.onclick = async () => {
-        console.log('🖼️ Manual paste from context menu...');
-        if (currentPageId) {
-          await pasteImageFromClipboard(currentPageId);
-        }
-        document.body.removeChild(debugMenu);
-      };
-      
-      closeBtn.onclick = () => {
-        document.body.removeChild(debugMenu);
-      };
-      
-      // Chiudi menu cliccando fuori
-      const closeOnOutsideClick = (e: MouseEvent) => {
-        if (debugMenu && debugMenu.contains(e.target as Node)) {
-          return; // Click sul menu, non chiudere
-        }
-        if (debugMenu && document.body.contains(debugMenu)) {
-          try {
-            document.body.removeChild(debugMenu);
-          } catch (error) {
-            console.warn('⚠️ Menu already removed:', error);
-          }
-        }
-        document.removeEventListener('click', closeOnOutsideClick);
-      };
-      setTimeout(() => {
-        document.addEventListener('click', closeOnOutsideClick);
-      }, 100);
-    };
-
     // Aggiungi event listener globale con capture
     document.addEventListener('paste', handlePaste, true);
-    document.addEventListener('contextmenu', handleContextMenu, true);
     
     console.log('📡 Global paste listener attached (capture mode)');
-    console.log('🖱️ Context menu listener attached (debug mode)');
 
     // Cleanup
     return () => {
       document.removeEventListener('paste', handlePaste, true);
-      document.removeEventListener('contextmenu', handleContextMenu, true);
       console.log('📡 Global paste listener removed (capture mode)');
-      console.log('🖱️ Context menu listener removed (debug mode)');
     };
   }, [pages, currentPageIndex, pasteImageFromClipboard]);
 
@@ -2872,17 +2773,19 @@ function App() {
   }, [buildJournalWorkbookBlob, buildPdfBlob, downloadBlob]);
 
   const handleJournalAmountClick = useCallback((amount: string) => {
-    // Inserisci l'importo nella calcolatrice
-    setDisplay((previous) => {
-      // Se c' già un'operazione, aggiungi l'importo
-      if (previous && !previous.includes('=')) {
-        return `${previous}+${amount}`;
-      }
-      return amount;
-    });
-    
-    // Apri la calcolatrice se non è già aperta
-    setIsCalculatorOpen(true);
+    // Inserisci l'importo nella calcolatrice solo se non è già aperta
+    if (!isCalculatorOpen) {
+      setDisplay((previous) => {
+        // Se c' già un'operazione, aggiungi l'importo
+        if (previous && !previous.includes('=')) {
+          return `${previous}+${amount}`;
+        }
+        return amount;
+      });
+      
+      // Apri la calcolatrice
+      setIsCalculatorOpen(true);
+    }
   }, []);
 
   const appendDisplay = useCallback((value: string) => {
@@ -3997,6 +3900,7 @@ function App() {
       if (key === "v") {
         event.preventDefault();
         void pasteCanvasSelection();
+        return;
       }
     };
 
@@ -4593,29 +4497,7 @@ function App() {
           title="Incolla immagine da clipboard"
           aria-label="Incolla immagine da clipboard"
           type="button"
-          onClick={async () => {
-            console.log('🎯 MANUAL paste button clicked!');
-            const currentPageId = pages[currentPageIndex]?.id ?? null;
-            console.log('📍 Current page ID:', currentPageId);
-            if (currentPageId) {
-              console.log('🚀 Calling pasteImageFromClipboard manually...');
-              await pasteImageFromClipboard(currentPageId);
-            } else {
-              console.warn('⚠️ No current page ID found');
-            }
-          }}
-          onPaste={async (e) => {
-            console.log('🎯 BUTTON paste event triggered!', e);
-            e.preventDefault();
-            const currentPageId = pages[currentPageIndex]?.id ?? null;
-            console.log('📍 Current page ID:', currentPageId);
-            if (currentPageId) {
-              console.log('🚀 Calling pasteImageFromClipboard...');
-              await pasteImageFromClipboard(currentPageId);
-            } else {
-              console.warn('⚠️ No current page ID found');
-            }
-          }}
+          onClick={() => void pasteCanvasSelection()}
         >
           <i className="fa-solid fa-paste" />
           <span className="sr-only">Incolla immagine da clipboard</span>
@@ -4684,7 +4566,7 @@ function App() {
           <i className="fa-solid fa-square-plus" />
           <span className="sr-only">Nuova pagina</span>
         </button>
-        <label htmlFor="pageSelect">Pagina</label>
+        <label htmlFor="pageSelect"></label>
         <select
           id="pageSelect"
           value={currentPageIndex}
@@ -4697,6 +4579,11 @@ function App() {
           ))}
         </select>
 
+        <span className="toolbar-status">
+        | di {pages.length} | {ocrStatus}
+        </span>
+
+        {/* Pulsanti principali - sempre visibili */}
         <button
           className="icon-button"
           title="Salva PDF"
@@ -4714,7 +4601,7 @@ function App() {
           aria-label="Condividi PDF + XLSX"
           type="button"
           onClick={() => void shareBoardAndJournal()}
-          disabled={isSharingFiles || isJournalExtracting || isPdfExporting}  // 🎯 Disabilita anche se PDF sta esportando
+          disabled={isSharingFiles || isJournalExtracting || isPdfExporting}
         >
           <i className={`fa-solid ${isSharingFiles ? 'fa-spinner fa-spin' : 'fa-share-nodes'}`} />
           <span className="sr-only">Condividi PDF + XLSX</span>
@@ -4729,6 +4616,48 @@ function App() {
           <i className="fa-solid fa-trash" />
           <span className="sr-only">Cancella oggetti selezionati</span>
         </button>
+
+        {/* Menu Mobile Button */}
+        <button
+          className="mobile-menu-toggle"
+          onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+          aria-label="Menu"
+          type="button"
+        >
+          <i className="fa-solid fa-bars" />
+        </button>
+
+        {/* Mobile Menu Content - solo pulsanti secondari */}
+        <div className={`mobile-menu ${isMobileMenuOpen ? 'open' : ''}`} onClick={(e) => e.stopPropagation()}>
+          <div className="mobile-menu-row">
+            <button
+              className="icon-button"
+              title="Copia oggetto"
+              aria-label="Copia oggetto"
+              type="button"
+              onClick={() => {
+                void copyCanvasSelection();
+                setIsMobileMenuOpen(false);
+              }}
+            >
+              <i className="fa-solid fa-copy" />
+              <span className="sr-only">Copia oggetto</span>
+            </button>
+            <button
+              className="icon-button"
+              title="Incolla immagine da clipboard"
+              aria-label="Incolla immagine da clipboard"
+              type="button"
+              onClick={() => {
+                void pasteCanvasSelection();
+                setIsMobileMenuOpen(false);
+              }}
+            >
+              <i className="fa-solid fa-paste" />
+              <span className="sr-only">Incolla immagine da clipboard</span>
+            </button>
+          </div>
+        </div>
         {/* Math Recognition button - DISABLED */}
         {/* <button
           className={`icon-button ${useMathRec ? 'active' : ''}`}
@@ -4743,9 +4672,6 @@ function App() {
             {useMathRec ? 'Math Recognition ON' : 'Math Recognition OFF'}
           </span>
         </button> */}
-        <span className="toolbar-status">
-          {ocrStatus} | Pagina {currentPageIndex + 1} di {pages.length}
-        </span>
       </section>
 
       <JournalPanel

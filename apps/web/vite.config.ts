@@ -8,7 +8,7 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: "auto",
-      includeAssets: ["icons/icon-192.png", "icons/icon-512.png"],
+      includeAssets: ["favicon.ico", "favicon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-512-maskable.png"],
       manifest: {
         name: "MYAccounting Whiteboard",
         short_name: "MYAccounting",
@@ -43,7 +43,7 @@ export default defineConfig({
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest}"]
       },
       devOptions: {
-        enabled: true
+        enabled: false  // Disabilitato in development per evitare 404
       }
     })
   ],
