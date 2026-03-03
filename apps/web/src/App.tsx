@@ -573,8 +573,8 @@ function App() {
         items: e.clipboardData?.items?.length || 0
       });
       
-      // Non preveniamo default per ora, per debug
-      // e.preventDefault();
+      // Preveniamo default per gestire noi l'evento
+      e.preventDefault();
       
       const currentPageId = pages[currentPageIndex]?.id ?? null;
       console.log('📍 Current page ID:', currentPageId);
@@ -684,15 +684,17 @@ function App() {
       }
     };
 
-    // Aggiungi event listener globale con capture
+    // Aggiungi event listener globale con capture E bubbling
     document.addEventListener('paste', handlePaste, true);
+    document.addEventListener('paste', handlePaste, false);
     
-    console.log('📡 Global paste listener attached (capture mode)');
+    console.log('📡 Global paste listeners attached (capture + bubble)');
 
     // Cleanup
     return () => {
       document.removeEventListener('paste', handlePaste, true);
-      console.log('📡 Global paste listener removed (capture mode)');
+      document.removeEventListener('paste', handlePaste, false);
+      console.log('📡 Global paste listeners removed');
     };
   }, [pages, currentPageIndex, pasteImageFromClipboard]);
 
@@ -2871,9 +2873,13 @@ function App() {
   }, []);
 
   const copyCanvasSelection = useCallback(async () => {
+    console.log('🎯 copyCanvasSelection START');
     const canvas = getActiveCanvas();
     const pageId = getCurrentPageId();
+    console.log('📍 copyCanvasSelection - canvas:', !!canvas, 'pageId:', pageId);
+    
     if (!canvas || !pageId) {
+      console.warn('⚠️ copyCanvasSelection - canvas o pageId mancanti');
       return;
     }
 
@@ -2881,33 +2887,69 @@ function App() {
       getActiveObject?: () => unknown;
     };
     const activeObject = canvasApi.getActiveObject?.() ?? null;
+    console.log('🎯 copyCanvasSelection - activeObject exists:', !!activeObject);
+    
     if (!activeObject) {
+      console.warn('⚠️ copyCanvasSelection - Nessun oggetto selezionato');
       setOcrStatus("Seleziona un oggetto da copiare");
       return;
     }
 
+    console.log('🔄 copyCanvasSelection - Cloning object...');
     const clonedObject = await cloneCanvasObject(activeObject);
+    console.log('✅ copyCanvasSelection - Object cloned:', !!clonedObject);
+    
     if (!clonedObject) {
+      console.error('❌ copyCanvasSelection - Clone failed');
       return;
     }
+    
     clipboardObjectRef.current = clonedObject;
     clipboardSourcePageIdRef.current = pageId;
     setOcrStatus("Oggetto copiato");
+    console.log('✅ copyCanvasSelection COMPLETED - object saved to clipboard');
   }, [cloneCanvasObject, getActiveCanvas, getCurrentPageId]);
 
   const pasteCanvasSelection = useCallback(async () => {
+    console.log('🎯 pasteCanvasSelection START');
     const source = clipboardObjectRef.current;
+    console.log('📍 pasteCanvasSelection - clipboard object exists:', !!source);
+    
     if (!source) {
+      console.warn('⚠️ pasteCanvasSelection - Nessun oggetto canvas negli appunti, provo con immagini di sistema...');
+      
+      // 🆕 PROVA A INCOLLARE IMMAGINI DI SISTEMA
+      const pageId = getCurrentPageId();
+      if (pageId) {
+        console.log('🔄 pasteCanvasSelection - Tentando incolla immagine di sistema...');
+        try {
+          await pasteImageFromClipboard(pageId);
+          console.log('✅ pasteCanvasSelection - Immagine di sistema incollata con successo');
+          return;
+        } catch (imageError) {
+          console.warn('⚠️ pasteCanvasSelection - Incolla immagine fallito:', imageError);
+        }
+      }
+      
+      console.warn('⚠️ pasteCanvasSelection - Nessun oggetto negli appunti (canvas o sistema)');
       return;
     }
+    
     const pageId = getCurrentPageId();
     const canvas = getCanvasByPageId(pageId);
+    console.log('📍 pasteCanvasSelection - pageId:', pageId, 'canvas:', !!canvas);
+    
     if (!canvas || !pageId) {
+      console.warn('⚠️ pasteCanvasSelection - canvas o pageId mancanti');
       return;
     }
 
+    console.log('🔄 pasteCanvasSelection - Cloning object...');
     const clonedObject = await cloneCanvasObject(source);
+    console.log('✅ pasteCanvasSelection - Object cloned:', !!clonedObject);
+    
     if (!clonedObject) {
+      console.error('❌ pasteCanvasSelection - Clone failed');
       return;
     }
 
@@ -2918,6 +2960,7 @@ function App() {
     };
 
     const offsetObject = (object: unknown) => {
+      console.log('📐 pasteCanvasSelection - Offsetting object...');
       const objApi = object as {
         left?: number;
         top?: number;
@@ -2931,9 +2974,12 @@ function App() {
         selectable: true
       });
       objApi.setCoords?.();
+      console.log('✅ pasteCanvasSelection - Object offset completed');
     };
 
+    console.log('🔄 pasteCanvasSelection - Discarding active selection...');
     canvasApi.discardActiveObject?.();
+    
     const clonedApi = clonedObject as {
       type?: string;
       canvas?: unknown;
@@ -2941,6 +2987,7 @@ function App() {
     };
 
     if (clonedApi.type === "activeSelection" && typeof clonedApi.forEachObject === "function") {
+      console.log('📦 pasteCanvasSelection - Processing multi-object selection...');
       clonedApi.canvas = canvas;
       const pastedObjects: unknown[] = [];
       clonedApi.forEachObject((object) => {
@@ -2950,27 +2997,34 @@ function App() {
       });
 
       if (pastedObjects.length > 1) {
+        console.log('🔄 pasteCanvasSelection - Creating active selection for multiple objects...');
         const fabricModule = fabricModuleRef.current ?? (await lazyImportFabric());
         if (!fabricModuleRef.current) {
           fabricModuleRef.current = fabricModule;
         }
         const selection = new fabricModule.ActiveSelection(pastedObjects as never[], { canvas });
         canvasApi.setActiveObject?.(selection);
+        console.log('✅ pasteCanvasSelection - Multi-object selection created');
       } else if (pastedObjects.length === 1) {
         canvasApi.setActiveObject?.(pastedObjects[0]);
+        console.log('✅ pasteCanvasSelection - Single object selected');
       }
     } else {
+      console.log('📦 pasteCanvasSelection - Processing single object...');
       offsetObject(clonedObject);
       canvasApi.add?.(clonedObject);
       canvasApi.setActiveObject?.(clonedObject);
+      console.log('✅ pasteCanvasSelection - Single object added and selected');
     }
 
     clipboardObjectRef.current = clonedObject;
     clipboardSourcePageIdRef.current = pageId;
+    console.log('🎨 pasteCanvasSelection - Requesting canvas render...');
     canvas.requestRenderAll();
     pushHistoryState(pageId);
     setOcrStatus("Oggetto incollato");
-  }, [cloneCanvasObject, getCanvasByPageId, getCurrentPageId, pushHistoryState]);
+    console.log('✅ pasteCanvasSelection COMPLETED');
+  }, [cloneCanvasObject, getCanvasByPageId, getCurrentPageId, pasteImageFromClipboard, pushHistoryState]);
 
   const handlePenClick = useCallback(() => {
     if (suppressToolClickRef.current) {
@@ -4482,26 +4536,6 @@ function App() {
           <i className="fa-solid fa-rotate-left" />
           <span className="sr-only">Undo</span>
         </button>
-        <button
-          className="icon-button"
-          title="Copia oggetto"
-          aria-label="Copia oggetto"
-          type="button"
-          onClick={() => void copyCanvasSelection()}
-        >
-          <i className="fa-solid fa-copy" />
-          <span className="sr-only">Copia oggetto</span>
-        </button>
-        <button
-          className="icon-button"
-          title="Incolla immagine da clipboard"
-          aria-label="Incolla immagine da clipboard"
-          type="button"
-          onClick={() => void pasteCanvasSelection()}
-        >
-          <i className="fa-solid fa-paste" />
-          <span className="sr-only">Incolla immagine da clipboard</span>
-        </button>
         <button className="icon-button" title="Redo" aria-label="Redo" type="button" onClick={() => void redo()}>
           <i className="fa-solid fa-rotate-right" />
           <span className="sr-only">Redo</span>
@@ -4617,6 +4651,28 @@ function App() {
           <span className="sr-only">Cancella oggetti selezionati</span>
         </button>
 
+        {/* Pulsanti copia/incolla - sempre visibili */}
+        <button
+          className="icon-button"
+          title="Copia oggetto"
+          aria-label="Copia oggetto"
+          type="button"
+          onClick={() => void copyCanvasSelection()}
+        >
+          <i className="fa-solid fa-copy" />
+          <span className="sr-only">Copia oggetto</span>
+        </button>
+        <button
+          className="icon-button"
+          title="Incolla immagine da clipboard"
+          aria-label="Incolla immagine da clipboard"
+          type="button"
+          onClick={() => void pasteCanvasSelection()}
+        >
+          <i className="fa-solid fa-paste" />
+          <span className="sr-only">Incolla immagine da clipboard</span>
+        </button>
+
         {/* Menu Mobile Button */}
         <button
           className="mobile-menu-toggle"
@@ -4627,35 +4683,12 @@ function App() {
           <i className="fa-solid fa-bars" />
         </button>
 
-        {/* Mobile Menu Content - solo pulsanti secondari */}
+        {/* Mobile Menu Content - vuoto, i pulsanti principali sono sempre visibili */}
         <div className={`mobile-menu ${isMobileMenuOpen ? 'open' : ''}`} onClick={(e) => e.stopPropagation()}>
           <div className="mobile-menu-row">
-            <button
-              className="icon-button"
-              title="Copia oggetto"
-              aria-label="Copia oggetto"
-              type="button"
-              onClick={() => {
-                void copyCanvasSelection();
-                setIsMobileMenuOpen(false);
-              }}
-            >
-              <i className="fa-solid fa-copy" />
-              <span className="sr-only">Copia oggetto</span>
-            </button>
-            <button
-              className="icon-button"
-              title="Incolla immagine da clipboard"
-              aria-label="Incolla immagine da clipboard"
-              type="button"
-              onClick={() => {
-                void pasteCanvasSelection();
-                setIsMobileMenuOpen(false);
-              }}
-            >
-              <i className="fa-solid fa-paste" />
-              <span className="sr-only">Incolla immagine da clipboard</span>
-            </button>
+            <span style={{padding: "8px", color: "#666", fontSize: "12px"} as React.CSSProperties}>
+              Tutti i pulsanti sono visibili nella toolbar
+            </span>
           </div>
         </div>
         {/* Math Recognition button - DISABLED */}
