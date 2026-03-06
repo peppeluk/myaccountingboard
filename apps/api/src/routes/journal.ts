@@ -7,16 +7,29 @@ import type { AppConfig } from "../config.js";
 
 const MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const JOURNAL_SHEET_PATH = "xl/worksheets/sheet2.xml";
-const JOURNAL_START_ROW = 11;
-const JOURNAL_END_ROW = 212;
-const MAX_ENTRIES = JOURNAL_END_ROW - JOURNAL_START_ROW + 1;
-const COLUMN_STYLE: Record<"D" | "E" | "F" | "G" | "H", string> = {
+const COLUMN_STYLE_FALLBACK: Record<"D" | "E" | "F" | "G" | "H", string> = {
   D: "23",
   E: "24",
   F: "24",
   G: "25",
   H: "25"
 };
+const templateKeySchema = z.enum(["t-smart", "t-smart-office"]);
+const JOURNAL_TEMPLATE_CONFIG = {
+  "t-smart": {
+    startRow: 11,
+    endRow: 212,
+    pathSelector: (config: AppConfig) => config.JOURNAL_TEMPLATE_PATH
+  },
+  "t-smart-office": {
+    startRow: 11,
+    endRow: 309,
+    pathSelector: (config: AppConfig) => config.JOURNAL_TEMPLATE_OFFICE_PATH
+  }
+} as const;
+const MAX_ENTRIES = Math.max(
+  ...Object.values(JOURNAL_TEMPLATE_CONFIG).map((value) => value.endRow - value.startRow + 1)
+);
 type XmlDocument = ReturnType<DOMParser["parseFromString"]>;
 type XmlElement = NonNullable<XmlDocument["documentElement"]>;
 
@@ -30,10 +43,12 @@ const entrySchema = z.object({
 
 const exportBodySchema = z.object({
   entries: z.array(entrySchema).max(MAX_ENTRIES),
+  templateKey: templateKeySchema.optional().default("t-smart"),
   fileName: z.string().max(120).optional()
 });
 
 type JournalEntryPayload = z.infer<typeof entrySchema>;
+type JournalTemplateKey = z.infer<typeof templateKeySchema>;
 
 function sanitizeFileName(input: string): string {
   const trimmed = input.trim();
@@ -70,13 +85,26 @@ function parseAmount(value: string): number | null {
   if (!raw) {
     return null;
   }
-  const base = raw.replace(/[€\s]/g, "");
-  const normalized = base.includes(",") ? base.replace(/\./g, "").replace(",", ".") : base;
+  const cleaned = raw.replace(/\s/g, "").replace(/[^\d,.-]/g, "");
+  if (!cleaned) {
+    return null;
+  }
+  const normalized = cleaned.includes(",")
+    ? cleaned.replace(/\./g, "").replace(",", ".")
+    : cleaned;
   const parsed = Number(normalized);
   if (!Number.isFinite(parsed)) {
     return null;
   }
   return parsed;
+}
+
+function getTemplateConfig(config: AppConfig, templateKey: JournalTemplateKey) {
+  const selected = JOURNAL_TEMPLATE_CONFIG[templateKey];
+  return {
+    ...selected,
+    templatePath: selected.pathSelector(config)
+  };
 }
 
 function getSheetDataNode(document: XmlDocument): XmlElement {
@@ -168,13 +196,18 @@ function applyEntryToRow(
   const cellF = getOrCreateCell(document, row, rowIndex, "F");
   const cellG = getOrCreateCell(document, row, rowIndex, "G");
   const cellH = getOrCreateCell(document, row, rowIndex, "H");
+  const styleD = cellD.getAttribute("s") ?? COLUMN_STYLE_FALLBACK.D;
+  const styleE = cellE.getAttribute("s") ?? COLUMN_STYLE_FALLBACK.E;
+  const styleF = cellF.getAttribute("s") ?? COLUMN_STYLE_FALLBACK.F;
+  const styleG = cellG.getAttribute("s") ?? COLUMN_STYLE_FALLBACK.G;
+  const styleH = cellH.getAttribute("s") ?? COLUMN_STYLE_FALLBACK.H;
 
   if (!entry) {
-    clearCell(cellD, COLUMN_STYLE.D);
-    clearCell(cellE, COLUMN_STYLE.E);
-    clearCell(cellF, COLUMN_STYLE.F);
-    clearCell(cellG, COLUMN_STYLE.G);
-    clearCell(cellH, COLUMN_STYLE.H);
+    clearCell(cellD, styleD);
+    clearCell(cellE, styleE);
+    clearCell(cellF, styleF);
+    clearCell(cellG, styleG);
+    clearCell(cellH, styleH);
     return;
   }
 
@@ -185,33 +218,33 @@ function applyEntryToRow(
   const credit = parseAmount(entry.credit);
 
   if (serialDate !== null) {
-    setNumericCell(document, cellD, COLUMN_STYLE.D, serialDate);
+    setNumericCell(document, cellD, styleD, serialDate);
   } else {
-    clearCell(cellD, COLUMN_STYLE.D);
+    clearCell(cellD, styleD);
   }
 
   if (accountName) {
-    setTextCell(document, cellE, COLUMN_STYLE.E, accountName);
+    setTextCell(document, cellE, styleE, accountName);
   } else {
-    clearCell(cellE, COLUMN_STYLE.E);
+    clearCell(cellE, styleE);
   }
 
   if (description) {
-    setTextCell(document, cellF, COLUMN_STYLE.F, description);
+    setTextCell(document, cellF, styleF, description);
   } else {
-    clearCell(cellF, COLUMN_STYLE.F);
+    clearCell(cellF, styleF);
   }
 
   if (debit !== null) {
-    setNumericCell(document, cellG, COLUMN_STYLE.G, debit);
+    setNumericCell(document, cellG, styleG, debit);
   } else {
-    clearCell(cellG, COLUMN_STYLE.G);
+    clearCell(cellG, styleG);
   }
 
   if (credit !== null) {
-    setNumericCell(document, cellH, COLUMN_STYLE.H, credit);
+    setNumericCell(document, cellH, styleH, credit);
   } else {
-    clearCell(cellH, COLUMN_STYLE.H);
+    clearCell(cellH, styleH);
   }
 }
 
@@ -247,8 +280,16 @@ export function registerJournalRoutes(app: FastifyInstance, config: AppConfig): 
       });
     }
 
+    const templateConfig = getTemplateConfig(config, parsedBody.data.templateKey);
+    const maxEntriesForTemplate = templateConfig.endRow - templateConfig.startRow + 1;
+    if (parsedBody.data.entries.length > maxEntriesForTemplate) {
+      return reply.code(400).send({
+        message: `Il template selezionato supporta al massimo ${maxEntriesForTemplate} righe.`
+      });
+    }
+
     try {
-      const templateBuffer = await readFile(config.JOURNAL_TEMPLATE_PATH);
+      const templateBuffer = await readFile(templateConfig.templatePath);
       const zip = await JSZip.loadAsync(templateBuffer);
       const sheetFile = zip.file(JOURNAL_SHEET_PATH);
       if (!sheetFile) {
@@ -262,9 +303,9 @@ export function registerJournalRoutes(app: FastifyInstance, config: AppConfig): 
       const sheetData = getSheetDataNode(document);
       const entries = normalizeEntries(parsedBody.data.entries);
 
-      for (let rowIndex = JOURNAL_START_ROW; rowIndex <= JOURNAL_END_ROW; rowIndex += 1) {
+      for (let rowIndex = templateConfig.startRow; rowIndex <= templateConfig.endRow; rowIndex += 1) {
         const row = getOrCreateRow(document, sheetData, rowIndex);
-        const entry = entries[rowIndex - JOURNAL_START_ROW] ?? null;
+        const entry = entries[rowIndex - templateConfig.startRow] ?? null;
         applyEntryToRow(document, row, rowIndex, entry);
       }
 
@@ -294,7 +335,7 @@ export function registerJournalRoutes(app: FastifyInstance, config: AppConfig): 
       return reply.send(outputBuffer);
     } catch (error) {
       request.log.error(
-        { error, templatePath: config.JOURNAL_TEMPLATE_PATH },
+        { error, templatePath: templateConfig.templatePath, templateKey: parsedBody.data.templateKey },
         "Impossibile generare il file Excel del giornale."
       );
       return reply.code(500).send({

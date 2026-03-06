@@ -710,6 +710,29 @@ button:disabled {
   color: #475569;
 }
 
+.journal-profile-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.journal-profile-selector label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.journal-profile-selector select {
+  min-width: 220px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 13px;
+  padding: 6px 8px;
+}
+
 .journal-panel-footer p {
   margin: 0;
 }

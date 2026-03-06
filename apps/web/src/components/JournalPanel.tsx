@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AccountOption } from "../data/pianoDeiConti";
+import type { JournalProfileId, JournalProfileOption } from "../data/journalProfiles";
 
 export type JournalEntry = {
   id: string;
@@ -16,9 +17,12 @@ type JournalPanelProps = {
   isOpen: boolean;
   entries: JournalEntry[];
   accounts: readonly AccountOption[];
+  selectedProfileId: JournalProfileId;
+  profileOptions: readonly JournalProfileOption[];
   isExtracting: boolean;
   minRows: number;
   onClose: () => void;
+  onChangeProfile: (profileId: JournalProfileId) => void;
   onExtract: () => void;
   onAddEntry: () => void;
   onClearEntries: () => void;
@@ -276,9 +280,12 @@ export function JournalPanel({
   isOpen,
   entries,
   accounts,
+  selectedProfileId,
+  profileOptions,
   isExtracting,
   minRows,
   onClose,
+  onChangeProfile,
   onExtract,
   onAddEntry,
   onClearEntries,
@@ -750,6 +757,20 @@ export function JournalPanel({
       </div>
 
       <footer className="journal-panel-footer">
+        <div className="journal-profile-selector">
+          <label htmlFor="journal-profile-select">Piano dei conti</label>
+          <select
+            id="journal-profile-select"
+            value={selectedProfileId}
+            onChange={(event) => onChangeProfile(event.target.value as JournalProfileId)}
+          >
+            {profileOptions.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="journal-panel-actions journal-panel-actions-bottom">
           <button type="button" onClick={onAddEntry}>
             + Riga
@@ -762,8 +783,8 @@ export function JournalPanel({
           </button>
         </div>
         <p>
-          Il campo E usa il piano dei conti caricato dal modello. Il file estratto aggiorna il foglio tecnico
-          LIBRO_GIORNALE.
+          Il campo E usa il piano dei conti del profilo selezionato. Il file estratto aggiorna il foglio tecnico
+          LIBRO_GIORNALE del template scelto.
         </p>
       </footer>
     </section>

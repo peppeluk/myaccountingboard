@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
-import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
+import {
+  DEFAULT_JOURNAL_PROFILE_ID,
+  JOURNAL_PROFILE_OPTIONS,
+  getJournalProfileOption,
+  type JournalProfileId
+} from "./data/journalProfiles";
 import { exportJournalWorkbook } from "./lib/api";
 import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
 import { normalizeExpression, formatExpressionForDisplay, normalizeOcrChunk, validateExpression, evaluateExpressionNative } from "./utils/ocrUtils";
@@ -295,6 +300,9 @@ function App() {
   const [isArchiveLoading, setIsArchiveLoading] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState("");
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
+  const [selectedJournalProfileId, setSelectedJournalProfileId] = useState<JournalProfileId>(
+    DEFAULT_JOURNAL_PROFILE_ID
+  );
   // const [useMathRec, setUseMathRec] = useState(false);
   // const mathRec = useMathRecognition();
   const [isSharingFiles, setIsSharingFiles] = useState(false);
@@ -2342,6 +2350,11 @@ function App() {
     URL.revokeObjectURL(downloadUrl);
   }, []);
 
+  const selectedJournalProfile = useMemo(
+    () => getJournalProfileOption(selectedJournalProfileId),
+    [selectedJournalProfileId]
+  );
+
   const buildJournalExportPayload = useCallback(
     () =>
       journalEntries.map((entry) => ({
@@ -2356,8 +2369,12 @@ function App() {
 
   const buildJournalWorkbookBlob = useCallback(
     async (datePart: string) =>
-      exportJournalWorkbook(buildJournalExportPayload(), `giornale_data_${datePart}`),
-    [buildJournalExportPayload]
+      exportJournalWorkbook(
+        buildJournalExportPayload(),
+        `giornale_data_${datePart}`,
+        selectedJournalProfile.templateKey
+      ),
+    [buildJournalExportPayload, selectedJournalProfile.templateKey]
   );
 
   const renderPageToFlattenedCanvas = useCallback(
@@ -2681,9 +2698,11 @@ function App() {
       const datePart = new Date().toISOString().slice(0, 10);
       const blob = await buildJournalWorkbookBlob(datePart);
       downloadBlob(blob, `giornale_data_${datePart}.xlsx`);
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error("Errore estrazione giornale:", error);
       window.alert(
-        "Estrazione non riuscita. Verifica che API sia avviata e che il template sia configurato in JOURNAL_TEMPLATE_PATH."
+        `Estrazione non riuscita.\n\nDettaglio: ${reason}\n\nVerifica che API sia avviata e che il template selezionato sia disponibile.`
       );
     } finally {
       setIsJournalExtracting(false);
@@ -2769,7 +2788,8 @@ function App() {
       window.alert(message);
     } catch (error) {
       console.error("❌ Errore condivisione:", error);
-      window.alert("Condivisione non riuscita. Verifica API e riprova.");
+      const reason = error instanceof Error ? error.message : String(error);
+      window.alert(`Condivisione non riuscita.\n\nDettaglio: ${reason}`);
     } finally {
       setIsSharingFiles(false);
       setIsPdfExporting(false);  // Riabilita PDF export
@@ -4962,10 +4982,13 @@ function App() {
       <JournalPanel
         isOpen={isJournalOpen}
         entries={journalEntries}
-        accounts={PIANO_DEI_CONTI}
+        accounts={selectedJournalProfile.accounts}
+        selectedProfileId={selectedJournalProfile.id}
+        profileOptions={JOURNAL_PROFILE_OPTIONS}
         isExtracting={isJournalExtracting}
         minRows={MIN_VISIBLE_JOURNAL_ENTRIES}
         onClose={() => setIsJournalOpen(false)}
+        onChangeProfile={setSelectedJournalProfileId}
         onExtract={() => void extractJournalData()}
         onAddEntry={addJournalEntry}
         onClearEntries={clearJournalEntries}

@@ -16,7 +16,14 @@ export type JournalEntryPayload = {
   credit: string;
 };
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3001";
+export type JournalTemplateKey = "t-smart" | "t-smart-office";
+
+const DEFAULT_API_BASE_URL =
+  typeof window !== "undefined"
+    ? `${window.location.protocol}//${window.location.hostname}:3001`
+    : "http://localhost:3001";
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -41,7 +48,8 @@ export function fetchHealth(): Promise<HealthResponse> {
 
 export async function exportJournalWorkbook(
   entries: JournalEntryPayload[],
-  fileName?: string
+  fileName?: string,
+  templateKey: JournalTemplateKey = "t-smart"
 ): Promise<Blob> {
   const response = await fetch(`${API_BASE_URL}/api/journal/export`, {
     method: "POST",
@@ -50,7 +58,8 @@ export async function exportJournalWorkbook(
     },
     body: JSON.stringify({
       entries,
-      fileName
+      fileName,
+      templateKey
     })
   });
 
