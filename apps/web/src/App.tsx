@@ -2776,17 +2776,6 @@ function App() {
     }
   }, [buildJournalWorkbookBlob, buildPdfBlob, downloadBlob]);
 
-  const appendDisplay = useCallback((value: string) => {
-    // Logica semplice senza gestione del cursore per evitare errori
-    setDisplay((previous) => {
-      if (previous.includes("=")) {
-        const result = previous.split("=")[1]?.trim() || "0";
-        return `${result}${value}`;
-      }
-      return `${previous}${value}`;
-    });
-  }, []);
-
   const solveDisplayExpression = useCallback(
     async (rawInput: string, fromOcr = false): Promise<boolean> => {
       const leftSide = rawInput.includes("=") ? rawInput.split("=")[0] ?? "" : rawInput;
@@ -2887,13 +2876,6 @@ function App() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [isCalculatorOpen, display]);
-
-  const handleCalculatorClear = useCallback(() => {
-    setDisplay("");
-    // Emetti evento per cancellare anche il campo attivo
-    const event = new CustomEvent('calculator-clear-field', {});
-    window.dispatchEvent(event);
-  }, []);
 
   // Funzioni per tastiera virtuale
   const openVirtualKeyboard = useCallback((element: HTMLInputElement, field: string) => {
