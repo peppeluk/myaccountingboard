@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
 import { PIANO_DEI_CONTI } from "./data/pianoDeiConti";
 import { exportJournalWorkbook } from "./lib/api";
-import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, lazyImportMathJS, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
+import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
 import { normalizeExpression, formatExpressionForDisplay, normalizeOcrChunk, validateExpression, evaluateExpressionNative } from "./utils/ocrUtils";
 import { mergeRecognizedText, formatArchiveDateTime, buildDocumentBaseName, normalizePageCanvasDataForPages, computeVirtualWindowRange, buildIndexRange } from "./utils/appUtils";
 // import { useMathRecognition } from './features/math-recognition';
@@ -305,6 +305,8 @@ function App() {
   );
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
   const [display, setDisplay] = useState("");
+  const [isVirtualKeyboardOpen, setIsVirtualKeyboardOpen] = useState(false);
+  const [keyboardTarget, setKeyboardTarget] = useState<{ element: HTMLInputElement; field: string } | null>(null);
   const [isCanvasReady, setIsCanvasReady] = useState(false);
   const [virtualWindowRange, setVirtualWindowRange] = useState<VirtualWindowRange>({ startIndex: 0, endIndex: 0 });
   const [intersectingPageIds, setIntersectingPageIds] = useState<string[]>([]);
@@ -2774,24 +2776,15 @@ function App() {
     }
   }, [buildJournalWorkbookBlob, buildPdfBlob, downloadBlob]);
 
-  const handleJournalAmountClick = useCallback((amount: string) => {
-    // Inserisci l'importo nella calcolatrice solo se non è già aperta
-    if (!isCalculatorOpen) {
-      setDisplay((previous) => {
-        // Se c' già un'operazione, aggiungi l'importo
-        if (previous && !previous.includes('=')) {
-          return `${previous}+${amount}`;
-        }
-        return amount;
-      });
-      
-      // Apri la calcolatrice
-      setIsCalculatorOpen(true);
-    }
-  }, []);
-
   const appendDisplay = useCallback((value: string) => {
-    setDisplay((previous) => `${previous}${value}`);
+    // Logica semplice senza gestione del cursore per evitare errori
+    setDisplay((previous) => {
+      if (previous.includes("=")) {
+        const result = previous.split("=")[1]?.trim() || "0";
+        return `${result}${value}`;
+      }
+      return `${previous}${value}`;
+    });
   }, []);
 
   const solveDisplayExpression = useCallback(
@@ -2818,27 +2811,19 @@ function App() {
 
       let result: number;
       let usedNative = false;
-
+      
+      // Usa solo la calcolatrice nativa
       try {
-        // Prova prima con mathjs
-        const { evaluate } = await lazyImportMathJS();
-        result = evaluate(expression);
-      } catch (error) {
-        // Fallback alla calcolatrice nativa
-        console.log("🔄 MathJS fallito, uso calcolatrice nativa:", error);
-        try {
-          result = evaluateExpressionNative(expression);
-          usedNative = true;
-        } catch (nativeError) {
-          const errorMsg = `Errore calcolo: ${nativeError instanceof Error ? nativeError.message : 'sconosciuto'}`;
-          if (fromOcr) {
-            setOcrStatus(`OCR: ${errorMsg}`);
-          } else {
-            setOcrStatus(errorMsg);
-            console.log(`❌ ${errorMsg}`);
-          }
-          return false;
+        result = evaluateExpressionNative(expression);
+        usedNative = true;
+      } catch (nativeError) {
+        const errorMsg = `Errore calcolo: ${nativeError instanceof Error ? nativeError.message : 'sconosciuto'}`;
+        if (fromOcr) {
+          setOcrStatus(`OCR: ${errorMsg}`);
+        } else {
+          setOcrStatus(errorMsg);
         }
+        return false;
       }
 
       const resolved = `${formatExpressionForDisplay(expression)}=${result}`;
@@ -2854,8 +2839,293 @@ function App() {
   );
 
   const calculate = useCallback(async () => {
-    await solveDisplayExpression(display);
+    const success = await solveDisplayExpression(display);
+    
+    // Emetti evento custom solo per il risultato completo
+    if (success) {
+      const result = display.includes("=") ? display.split("=")[1]?.trim() : display.trim();
+      if (result && !isNaN(Number(result))) {
+        const event = new CustomEvent('calculator-input', {
+          detail: { value: result, isResult: true }
+        });
+        window.dispatchEvent(event);
+      }
+    }
   }, [display, solveDisplayExpression]);
+
+  // Gestione click fuori dalla calcolatrice
+  useEffect(() => {
+    if (!isCalculatorOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const calculator = document.querySelector('.calculator');
+      const target = event.target as Element;
+      
+      // Controlla se il click è su un campo numerico del journal
+      const isNumericField = target.closest('input[data-field="debit"], input[data-field="credit"]');
+      
+      if (calculator && !calculator.contains(target) && !isNumericField) {
+        // Click fuori dalla calcolatrice e non su un campo numerico
+        const currentValue = display.trim();
+        
+        // Se c'è un valore valido, emetti evento per inserirlo
+        if (currentValue && !isNaN(Number(currentValue))) {
+          const event = new CustomEvent('calculator-input', {
+            detail: { value: currentValue, isResult: true }
+          });
+          window.dispatchEvent(event);
+        }
+        
+        // Chiudi la calcolatrice
+        setIsCalculatorOpen(false);
+        setDisplay("");
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isCalculatorOpen, display]);
+
+  const handleCalculatorClear = useCallback(() => {
+    setDisplay("");
+    // Emetti evento per cancellare anche il campo attivo
+    const event = new CustomEvent('calculator-clear-field', {});
+    window.dispatchEvent(event);
+  }, []);
+
+  // Funzioni per tastiera virtuale
+  const openVirtualKeyboard = useCallback((element: HTMLInputElement, field: string) => {
+    setKeyboardTarget({ element, field });
+    setIsVirtualKeyboardOpen(true);
+  }, []);
+
+  const closeVirtualKeyboard = useCallback(() => {
+    console.log('🔽 Closing virtual keyboard...');
+    console.log('🔽 Keyboard target:', keyboardTarget);
+    
+    // Prima di chiudere, triggera l'evento input per salvare il valore
+    // nei campi controlled come 'description'
+    if (keyboardTarget && keyboardTarget.field === 'description') {
+      console.log('🔽 Target is description field, checking current value...');
+      console.log('🔽 Element value before input:', keyboardTarget.element.value);
+      console.log('🔽 Triggering input event on keyboard close for description field...');
+      
+      const inputEvent = new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        data: '',
+        inputType: 'insertText'
+      });
+      const result = keyboardTarget.element.dispatchEvent(inputEvent);
+      console.log('🔽 Input event dispatched, result:', result);
+      console.log('🔽 Element value after input:', keyboardTarget.element.value);
+    } else {
+      console.log('🔽 Target is not description field or no target, skipping input event');
+    }
+    
+    console.log('🔽 Setting isVirtualKeyboardOpen to false');
+    setIsVirtualKeyboardOpen(false);
+    console.log('🔽 Setting keyboardTarget to null');
+    setKeyboardTarget(null);
+    console.log('🔽 Virtual keyboard closed');
+  }, [keyboardTarget]);
+
+  const handleVirtualKeyPress = useCallback((key: string) => {
+    console.log('🎹 Virtual Key Pressed:', key);
+    
+    if (!keyboardTarget) {
+      console.log('❌ No keyboard target');
+      return;
+    }
+
+    const { element, field } = keyboardTarget;
+    const start = element.selectionStart || 0;
+    const end = element.selectionEnd || 0;
+    const currentValue = element.value;
+    
+    console.log('📍 Cursor position:', { start, end, currentValue, field });
+
+    let newValue: string;
+    let newCursorPos: number;
+
+    if (key === "BACKSPACE" || key === "⌫") {
+      if (start > 0) {
+        newValue = currentValue.slice(0, start - 1) + currentValue.slice(end);
+        newCursorPos = start - 1;
+        console.log('🔙 Backspace:', { newValue, newCursorPos });
+      } else {
+        console.log('🔙 Backspace: nothing to delete');
+        return; // Niente da cancellare
+      }
+    } else if (key === "CLEAR") {
+      newValue = "";
+      newCursorPos = 0;
+      console.log('🗑️ Clear:', { newValue, newCursorPos });
+    } else if (key === "ENTER") {
+      newValue = currentValue.slice(0, start) + '\n' + currentValue.slice(end);
+      newCursorPos = start + 1;
+      console.log('↵️ Enter:', { newValue, newCursorPos });
+    } else if (key === "SPACE") {
+      newValue = currentValue.slice(0, start) + ' ' + currentValue.slice(end);
+      newCursorPos = start + 1;
+      console.log('␣ Space:', { newValue, newCursorPos });
+    } else {
+      // Inserisci il carattere normale
+      newValue = currentValue.slice(0, start) + key + currentValue.slice(end);
+      newCursorPos = start + key.length;
+      console.log('⌨️ Normal key:', { key, newValue, newCursorPos });
+    }
+
+    // Aggiorna il valore
+    element.value = newValue;
+    console.log('📝 Value updated:', element.value);
+    
+    // Imposta il cursore in modo sincrono
+    element.setSelectionRange(newCursorPos, newCursorPos);
+    console.log('👆 Cursor set:', newCursorPos);
+
+    // Per campi controlled come 'description', chiama direttamente la funzione onUpdateEntry
+    if (field === 'description') {
+      console.log('📝 Calling onUpdateEntry directly for description field...');
+      
+      // Chiama direttamente la funzione onUpdateEntry se disponibile
+      const onUpdateEntry = (element as any)._onUpdateEntry;
+      if (onUpdateEntry && typeof onUpdateEntry === 'function') {
+        onUpdateEntry(newValue);
+        console.log('✅ onUpdateEntry called directly');
+      } else {
+        console.log('❌ onUpdateEntry not found, falling back to input event');
+        // Fallback: trigger input event
+        const inputEvent = new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          data: key,
+          inputType: 'insertText'
+        });
+        element.dispatchEvent(inputEvent);
+        console.log('✅ Input event dispatched as fallback');
+      }
+    }
+
+    // Per caratteri normali, chiama direttamente la funzione handleInputChange dell'AccountPicker
+    if (key && key !== "BACKSPACE" && key !== "⌫" && key !== "ENTER" && key !== "SPACE" && key !== "CLEAR") {
+      if (field === 'account') {
+        console.log('🔍 Calling handleInputChange directly for account field...');
+        
+        // Chiama direttamente la funzione handleInputChange se disponibile
+        const handleInputChange = (element as any)._handleInputChange;
+        if (handleInputChange && typeof handleInputChange === 'function') {
+          handleInputChange(newValue);
+          console.log('✅ handleInputChange called directly');
+        } else {
+          console.log('❌ handleInputChange not found, falling back to change event');
+          // Fallback: trigger change event
+          const changeEvent = new Event('change', {
+            bubbles: true,
+            cancelable: true
+          });
+          element.dispatchEvent(changeEvent);
+          console.log('✅ Change event dispatched as fallback');
+        }
+      }
+    }
+
+    // Se è il tasto ENTER, triggera l'evento keydown per selezionare il primo conto
+    if (key === "ENTER") {
+      if (field === 'account') {
+        console.log('↵️ Triggering enter keydown for account field...');
+        const enterEvent = new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true
+        });
+        element.dispatchEvent(enterEvent);
+        console.log('✅ Enter keydown dispatched');
+      }
+    }
+    
+    console.log('🎯 Virtual key press completed');
+  }, [keyboardTarget]);
+
+  // Chiudi la tastiera virtuale quando si clicca fuori
+  useEffect(() => {
+    if (isVirtualKeyboardOpen) {
+      let keyboardJustOpened = true;
+      
+      const handleClickOutside = (event: MouseEvent) => {
+        // Controlla se il click è stato fatto fuori dalla tastiera virtuale
+        const keyboardElement = document.querySelector('.virtual-keyboard');
+        if (keyboardElement && !keyboardElement.contains(event.target as Node)) {
+          // Non chiudere se la tastiera è stata appena aperta
+          if (keyboardJustOpened) {
+            keyboardJustOpened = false;
+            console.log('🖱️ Click ignored - keyboard just opened');
+            return;
+          }
+          console.log('🖱️ Click outside detected, closing virtual keyboard');
+          closeVirtualKeyboard();
+        }
+      };
+
+      // Resetta il flag dopo un breve periodo
+      const resetTimer = setTimeout(() => {
+        keyboardJustOpened = false;
+      }, 200);
+
+      // Aggiungi event listener con capture per intercettare tutti i click
+      document.addEventListener('click', handleClickOutside, true);
+      
+      return () => {
+        document.removeEventListener('click', handleClickOutside, true);
+        clearTimeout(resetTimer);
+      };
+    }
+  }, [isVirtualKeyboardOpen, closeVirtualKeyboard]);
+
+  // Chiudi la tastiera virtuale quando si apre la calcolatrice
+  useEffect(() => {
+    if (isCalculatorOpen && isVirtualKeyboardOpen) {
+      console.log('🧮 Calculator opened, closing virtual keyboard');
+      closeVirtualKeyboard();
+    }
+  }, [isCalculatorOpen, isVirtualKeyboardOpen, closeVirtualKeyboard]);
+
+  // Event listener per gestire l'impostazione del valore della calcolatrice
+  useEffect(() => {
+    const handleCalculatorSetValue = (event: CustomEvent) => {
+      const { value } = event.detail;
+      setDisplay(value);
+    };
+
+    const handleCalculatorAddValue = (event: CustomEvent) => {
+      const { value } = event.detail;
+      setDisplay((previous) => {
+        // Se c'è già un risultato (contiene "="), inizia una nuova espressione con il risultato
+        if (previous.includes("=")) {
+          const result = previous.split("=")[1]?.trim() || "0";
+          return `${result}+${value}`;
+        }
+        // Altrimenti aggiungi con +
+        if (previous.trim() === "") {
+          return value;
+        }
+        return `${previous}+${value}`;
+      });
+    };
+
+    window.addEventListener('calculator-set-value', handleCalculatorSetValue as EventListener);
+    window.addEventListener('calculator-add-value', handleCalculatorAddValue as EventListener);
+    
+    return () => {
+      window.removeEventListener('calculator-set-value', handleCalculatorSetValue as EventListener);
+      window.removeEventListener('calculator-add-value', handleCalculatorAddValue as EventListener);
+    };
+  }, []);
 
   const cloneCanvasObject = useCallback(async (source: unknown): Promise<unknown | null> => {
     if (!source || typeof source !== "object") {
@@ -4719,7 +4989,7 @@ function App() {
         onClearEntries={clearJournalEntries}
         onRemoveEntry={removeJournalEntry}
         onUpdateEntry={updateJournalEntry}
-        onAmountClick={handleJournalAmountClick}
+        onOpenVirtualKeyboard={openVirtualKeyboard}
       />
 
       {isArchiveOpen && (
@@ -4938,9 +5208,10 @@ function App() {
             value={display}
             onChange={(event) => setDisplay(event.target.value)}
             placeholder="Espressione"
+            readOnly
           />
           <div className="calculator-grid">
-            {["7", "8", "9", "/", "(", "4", "5", "6", "*", ")", "1", "2", "3", "-", "^", "0", ".", "%", "+", "C"].map(
+            {["7", "8", "9", "/", "⌫", "4", "5", "6", "*", "C", "1", "2", "3", "-", "(", "0", ".", "+", ")"].map(
               (item) => (
                 <button
                   key={item}
@@ -4950,7 +5221,11 @@ function App() {
                       setDisplay("");
                       return;
                     }
-                    appendDisplay(item);
+                    if (item === "⌫") {
+                      setDisplay((previous) => previous.slice(0, -1));
+                      return;
+                    }
+                    setDisplay((previous) => previous + item);
                   }}
                 >
                   {item}
@@ -4961,6 +5236,71 @@ function App() {
           <button className="equals" type="button" onClick={calculate}>
             =
           </button>
+        </section>
+      )}
+
+      {isVirtualKeyboardOpen && (
+        <section className="virtual-keyboard">
+          <header>
+            <button
+              className="icon-button"
+              title="Chiudi"
+              aria-label="Chiudi"
+              type="button"
+              onClick={closeVirtualKeyboard}
+            >
+              <i className="fa-solid fa-xmark" />
+              <span className="sr-only">Chiudi</span>
+            </button>
+          </header>
+          <div className="keyboard-numbers">
+            {["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map((key) => (
+              <button
+                key={key}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()} // Previene il focus
+                onClick={() => handleVirtualKeyPress(key)}
+                className="number-key"
+              >
+                {key}
+              </button>
+            ))}
+          </div>
+          <div className="keyboard-grid">
+            {["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "⌫"].map((key) => (
+              <button
+                key={key}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()} // Previene il focus
+                onClick={() => handleVirtualKeyPress(key)}
+                className={key === "⌫" ? "backspace" : ""}
+              >
+                {key}
+              </button>
+            ))}
+            {["A", "S", "D", "F", "G", "H", "J", "K", "L", "ENTER"].map((key) => (
+              <button
+                key={key}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()} // Previene il focus
+                onClick={() => handleVirtualKeyPress(key)}
+                className={key === "ENTER" ? "enter" : ""}
+              >
+                {key === "ENTER" ? "↵" : key}
+              </button>
+            ))}
+            {["Z", "X", "C", "V", "B", "N", "M", ",", ".", "SPACE"].map((key) => (
+              <button
+                key={key}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()} // Previene il focus
+                onClick={() => handleVirtualKeyPress(key)}
+                className={key === "SPACE" ? "space" : key === "CLEAR" ? "clear" : ""}
+              >
+                {key === "SPACE" ? "␣" : key}
+              </button>
+            ))}
+          </div>
         </section>
       )}
     </main>

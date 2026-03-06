@@ -993,8 +993,9 @@ button:disabled {
 
 .calculator {
   position: fixed;
-  right: 14px;
-  bottom: 102px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   width: 320px;
   border: 1px solid #d5dce7;
   border-radius: 12px;
@@ -1007,6 +1008,7 @@ button:disabled {
 .calculator header {
   display: flex;
   justify-content: space-between;
+  gap: 12px;
   align-items: center;
   margin-bottom: 8px;
 }
@@ -1030,10 +1032,19 @@ button:disabled {
   gap: 6px;
 }
 
+.calculator-grid button:nth-child(5n) {
+  background: #6c757d;
+  color: white;
+}
+
+.calculator-grid button:nth-child(5n-1) {
+  background: #dc3545;
+  color: white;
+}
+
 .equals {
   margin-top: 8px;
   width: 100%;
-  font-weight: 700;
 }
 
 .sr-only {
@@ -1198,13 +1209,185 @@ button:disabled {
 
   .calculator {
     width: min(320px, calc(100vw - 20px));
-    right: 10px;
-    bottom: 98px;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
   }
 
   .toolbar-status {
     width: 100%;
     margin-left: 0;
   }
+}
 
+/* Miglioramento layout campi importi */
+.journal-amount-cell {
+  min-width: 120px;
+}
+
+.journal-amount-cell input {
+  border-radius: 4px 0 0 4px !important;
+}
+
+.journal-amount-cell .clear-field-btn {
+  border-radius: 0 4px 4px 0 !important;
+}
+
+.calculator-selected-field {
+  outline: 2px solid #007bff !important;
+  outline-offset: 2px !important;
+  background-color: #f3f8ff !important;
+  border-color: #007bff !important;
+}
+
+/* Tastiera Virtuale */
+.virtual-keyboard {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: white;
+  border: 2px solid #ccc;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  z-index: 10000;
+  padding: 12px;
+  width: 480px;
+  max-width: 90vw;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.virtual-keyboard header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #eee;
+}
+
+.virtual-keyboard h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #333;
+}
+
+.keyboard-numbers {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.keyboard-numbers button {
+  padding: 6px 4px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #e3f2fd;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  min-height: 28px;
+  color: #1976d2;
+}
+
+.keyboard-numbers button:hover {
+  background: #bbdefb;
+  border-color: #1976d2;
+  transform: scale(1.05);
+}
+
+.keyboard-numbers button:active {
+  background: #1976d2;
+  color: white;
+  transform: scale(0.95);
+}
+
+.keyboard-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 6px;
+}
+
+.keyboard-grid button {
+  padding: 10px 6px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #f8f9fa;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  min-height: 38px;
+}
+
+.keyboard-grid button:hover {
+  background: #e9ecef;
+  border-color: #007bff;
+}
+
+.keyboard-grid button:active {
+  background: #007bff;
+  color: white;
+  transform: scale(0.95);
+}
+
+.keyboard-grid button.backspace,
+.keyboard-grid button.enter {
+  background: #6c757d;
+  color: white;
+  border-color: #5a6268;
+}
+
+.keyboard-grid button.backspace:hover,
+.keyboard-grid button.enter:hover {
+  background: #5a6268;
+}
+
+.keyboard-grid button.space {
+  grid-column: span 4;
+  background: #28a745;
+  color: white;
+  border-color: #1e7e34;
+}
+
+.keyboard-grid button.space:hover {
+  background: #1e7e34;
+}
+
+/* Responsive per tastiera */
+@media (max-width: 768px) {
+  .virtual-keyboard {
+    width: 95vw;
+    padding: 12px;
+  }
+  
+  .keyboard-numbers {
+    grid-template-columns: repeat(8, 1fr);
+    gap: 3px;
+    margin-bottom: 6px;
+  }
+  
+  .keyboard-numbers button {
+    padding: 5px 3px;
+    font-size: 11px;
+    min-height: 24px;
+  }
+  
+  .keyboard-grid {
+    grid-template-columns: repeat(8, 1fr);
+    gap: 6px;
+  }
+  
+  .keyboard-grid button {
+    padding: 10px 6px;
+    font-size: 12px;
+    min-height: 40px;
+  }
+  
+  .keyboard-grid button.space {
+    grid-column: span 3;
+  }
 }
