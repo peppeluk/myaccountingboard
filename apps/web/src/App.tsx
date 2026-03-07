@@ -314,6 +314,7 @@ function App() {
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
   const [display, setDisplay] = useState("");
   const [isVirtualKeyboardOpen, setIsVirtualKeyboardOpen] = useState(false);
+  const [disableSystemKeyboard, setDisableSystemKeyboard] = useState(true); // Default disabilitato
   const [keyboardTarget, setKeyboardTarget] = useState<{ element: HTMLInputElement; field: string } | null>(null);
   const [isCanvasReady, setIsCanvasReady] = useState(false);
   const [virtualWindowRange, setVirtualWindowRange] = useState<VirtualWindowRange>({ startIndex: 0, endIndex: 0 });
@@ -4863,6 +4864,18 @@ function App() {
           <span className="sr-only">Calcolatrice</span>
         </button>
         <button
+          className={`icon-button ${disableSystemKeyboard ? "active" : ""}`}
+          title={disableSystemKeyboard ? "Tastiera di sistema disabilitata" : "Tastiera di sistema abilitata"}
+          aria-label={disableSystemKeyboard ? "Abilita tastiera di sistema" : "Disabilita tastiera di sistema"}
+          type="button"
+          onClick={() => setDisableSystemKeyboard(!disableSystemKeyboard)}
+        >
+          <i className={`fa-solid ${disableSystemKeyboard ? "fa-keyboard-slash" : "fa-keyboard"}`} />
+          <span className="sr-only">
+            {disableSystemKeyboard ? "Abilita tastiera di sistema" : "Disabilita tastiera di sistema"}
+          </span>
+        </button>
+        <button
           className="icon-button"
           title="Nuova pagina"
           aria-label="Nuova pagina"
@@ -4995,6 +5008,7 @@ function App() {
         onRemoveEntry={removeJournalEntry}
         onUpdateEntry={updateJournalEntry}
         onOpenVirtualKeyboard={openVirtualKeyboard}
+        disableSystemKeyboard={disableSystemKeyboard}
       />
 
       {isArchiveOpen && (

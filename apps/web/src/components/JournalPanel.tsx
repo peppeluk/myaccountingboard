@@ -29,6 +29,7 @@ type JournalPanelProps = {
   onRemoveEntry: (entryId: string) => void;
   onUpdateEntry: (entryId: string, patch: Partial<JournalEntry>) => void;
   onOpenVirtualKeyboard?: (element: HTMLInputElement, field: string) => void;
+  disableSystemKeyboard?: boolean;
 };
 
 type AccountPickerProps = {
@@ -37,6 +38,7 @@ type AccountPickerProps = {
   accounts: readonly AccountOption[];
   onUpdate: (patch: Pick<JournalEntry, "accountCode" | "accountName">) => void;
   onOpenVirtualKeyboard?: (element: HTMLInputElement, field: string) => void;
+  disableSystemKeyboard?: boolean;
 };
 
 function normalizeForSearch(value: string): string {
@@ -117,7 +119,7 @@ function formatAmountForDisplay(rawValue: string): string {
   return amountFormatter.format(parsed);
 }
 
-function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboard }: AccountPickerProps) {
+function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboard, disableSystemKeyboard }: AccountPickerProps) {
   const [query, setQuery] = useState(entry.accountName);
   const [isOpen, setIsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -232,11 +234,10 @@ function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboa
       <input
         id={inputId}
         value={query}
+        inputMode={disableSystemKeyboard ? "none" : "text"}
+        readOnly={disableSystemKeyboard}
         onFocus={() => {
           setIsOpen(true);
-          if (onOpenVirtualKeyboard) {
-            onOpenVirtualKeyboard(document.getElementById(inputId) as HTMLInputElement, 'account');
-          }
         }}
         onChange={(event) => handleInputChange(event.target.value)}
         onKeyDown={(event) => {
@@ -249,7 +250,28 @@ function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboa
             applyAccount(filteredAccounts[0]);
           }
         }}
+        onDoubleClick={(event) => {
+          console.log('🔍 AccountPicker onDoubleClick called');
+          // Espone la funzione handleInputChange per la tastiera virtuale
+          const target = event.target as HTMLInputElement;
+          (target as any)._handleInputChange = (value: string) => {
+            console.log('🔍 Direct handleInputChange called with:', value);
+            handleInputChange(value);
+          };
+          
+          if (onOpenVirtualKeyboard) {
+            onOpenVirtualKeyboard(target, 'account');
+          }
+        }}
+        onBlur={(event) => {
+          console.log('🔍 AccountPicker onBlur called');
+          // Rimuove la funzione esposta quando il campo perde focus
+          const target = event.target as HTMLInputElement;
+          delete (target as any)._handleInputChange;
+        }}
         placeholder="Cerca conto..."
+        title="Doppio click per aprire la tastiera virtuale"
+        style={{ cursor: 'pointer' }}
       />
       {isOpen && (
         <div className="account-dropdown" role="listbox" aria-label="Piano dei conti">
@@ -291,7 +313,8 @@ export function JournalPanel({
   onClearEntries,
   onRemoveEntry,
   onUpdateEntry,
-  onOpenVirtualKeyboard
+  onOpenVirtualKeyboard,
+  disableSystemKeyboard = true
 }: JournalPanelProps) {
   // Ref per memorizzare il campo target
   const targetFieldRef = useRef<{
@@ -661,25 +684,29 @@ export function JournalPanel({
                     accounts={accounts}
                     onUpdate={(patch) => onUpdateEntry(entry.id, patch)}
                     onOpenVirtualKeyboard={onOpenVirtualKeyboard}
+                    disableSystemKeyboard={disableSystemKeyboard}
                   />
                 </td>
                 <td className={entry.closeLine ? "journal-close-line-cell" : undefined}>
                   <input
                     value={entry.description}
+                    inputMode={disableSystemKeyboard ? "none" : "text"}
+                    readOnly={disableSystemKeyboard}
                     onChange={(event) => {
                       console.log('📝 Description onChange called with:', event.target.value);
                       onUpdateEntry(entry.id, { description: event.target.value });
                     }}
-                    onFocus={(event) => {
-                      console.log('📝 Description onFocus called');
+                    onDoubleClick={(event) => {
+                      console.log('📝 Description onDoubleClick called');
                       // Espone la funzione onUpdateEntry per la tastiera virtuale
-                      (event.target as any)._onUpdateEntry = (value: string) => {
+                      const target = event.target as HTMLInputElement;
+                      (target as any)._onUpdateEntry = (value: string) => {
                         console.log('📝 Direct onUpdateEntry called with:', value);
                         onUpdateEntry(entry.id, { description: value });
                       };
                       
                       if (onOpenVirtualKeyboard) {
-                        onOpenVirtualKeyboard(event.target, 'description');
+                        onOpenVirtualKeyboard(target, 'description');
                       }
                     }}
                     onBlur={(event) => {
@@ -688,6 +715,8 @@ export function JournalPanel({
                       delete (event.target as any)._onUpdateEntry;
                     }}
                     placeholder="Descrizione"
+                    title="Doppio click per aprire la tastiera virtuale"
+                    style={{ cursor: 'pointer' }}
                   />
                 </td>
                 <td className="journal-amount-cell">

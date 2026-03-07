@@ -470,7 +470,7 @@ button:disabled {
 .journal-table th,
 .journal-table td {
   border: none;
-  padding: 8px;
+  padding: 12px 8px; /* Aumentato padding verticale da 8px a 12px */
   vertical-align: top;
   background: #ffffff;
   border-right: 2px solid #cbd5e1;
@@ -487,10 +487,10 @@ button:disabled {
   background: #f8fafc;
   z-index: 1;
   text-align: left;
-  font-size: 14px;
+  font-size: 16px; /* Aumentato da 14px a 16px */
   font-weight: 600;
   color: #334155;
-  padding: 8px;
+  padding: 12px 8px; /* Aumentato padding verticale */
   border-right: 2px solid #94a3b8;
 }
 
@@ -503,23 +503,23 @@ button:disabled {
   min-width: 0;
   border: none;
   background: transparent;
-  font-size: 15px;
+  font-size: 18px; /* Aumentato da 15px a 18px */
   font-family: Verdana, Geneva, Tahoma, sans-serif;
-  padding: 6px 4px;
+  padding: 8px 4px; /* Aumentato padding per maggior leggibilità */
   outline: none;
-  line-height: 1.4;
+  line-height: 1.5; /* Aumentato line-height */
 }
 
 .journal-table input[type="date"] {
   font-family: Verdana, Geneva, Tahoma, sans-serif;
-  font-size: 15px;
+  font-size: 18px; /* Aumentato da 15px a 18px */
   font-weight: 500;
   color: #334155;
-  padding: 6px 4px;
+  padding: 8px 4px; /* Aumentato padding */
   border: none;
   background: transparent;
   outline: none;
-  line-height: 1.4;
+  line-height: 1.5; /* Aumentato line-height */
 }
 
 .journal-table input[type="date"]:focus {
@@ -571,20 +571,20 @@ button:disabled {
 
 .journal-date-column,
 .journal-date-cell {
-  width: 120px;
-  min-width: 120px;
+  width: 140px; /* Aumentato da 120px a 140px */
+  min-width: 140px; /* Aumentato da 120px a 140px */
 }
 
 .journal-account-code-column,
 .journal-account-code-cell {
-  width: 88px;
-  min-width: 88px;
+  width: 100px; /* Aumentato da 88px a 100px */
+  min-width: 100px; /* Aumentato da 88px a 100px */
 }
 
 .journal-account-code-cell {
   color: #1d4ed8;
   font-family: Verdana, Geneva, Tahoma, sans-serif;
-  font-size: 15px;
+  font-size: 18px; /* Aumentato da 15px a 18px */
   font-weight: 700;
   white-space: nowrap;
 }
@@ -595,23 +595,25 @@ button:disabled {
 }
 
 .journal-account-cell {
-  min-width: 250px;
+  min-width: 280px; /* Aumentato da 250px a 280px */
 }
 
 .journal-amount-column,
 .journal-amount-cell {
-  width: 120px;
-  min-width: 120px;
+  width: 140px; /* Aumentato da 120px a 140px */
+  min-width: 140px; /* Aumentato da 120px a 140px */
 }
 
 .journal-amount-cell input {
   text-align: right;
   font-variant-numeric: tabular-nums;
   font-family: Verdana, Geneva, Tahoma, sans-serif;
-  font-size: 15px;
+  font-size: 18px; /* Aumentato da 15px a 18px */
   font-weight: 600;
   cursor: pointer;
   transition: background-color 0.2s ease;
+  padding: 8px 4px; /* Aumentato padding */
+  line-height: 1.5; /* Aumentato line-height */
 }
 
 .journal-amount-cell input:hover {
@@ -1254,6 +1256,23 @@ button:disabled {
 
 .journal-amount-cell .clear-field-btn {
   border-radius: 0 4px 4px 0 !important;
+}
+
+/* Fix per tastiera virtuale su mobile */
+input[readonly],
+input[inputmode="none"] {
+  cursor: pointer !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+}
+
+input[readonly]:focus,
+input[inputmode="none"]:focus {
+  outline: 2px solid #007bff !important;
+  outline-offset: 2px !important;
+  background-color: #f3f8ff !important;
 }
 
 .calculator-selected-field {
