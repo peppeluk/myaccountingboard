@@ -4864,13 +4864,13 @@ function App() {
           <span className="sr-only">Calcolatrice</span>
         </button>
         <button
-          className={`icon-button ${disableSystemKeyboard ? "active" : ""}`}
+          className={`icon-button ${!disableSystemKeyboard ? "active" : ""}`}
           title={disableSystemKeyboard ? "Tastiera di sistema disabilitata" : "Tastiera di sistema abilitata"}
           aria-label={disableSystemKeyboard ? "Abilita tastiera di sistema" : "Disabilita tastiera di sistema"}
           type="button"
           onClick={() => setDisableSystemKeyboard(!disableSystemKeyboard)}
         >
-          <i className={`fa-solid ${disableSystemKeyboard ? "fa-keyboard-slash" : "fa-keyboard"}`} />
+          <i className={`fa-solid fa-keyboard`} style={{ color: disableSystemKeyboard ? '#dc2626' : undefined }} />
           <span className="sr-only">
             {disableSystemKeyboard ? "Abilita tastiera di sistema" : "Disabilita tastiera di sistema"}
           </span>

@@ -687,42 +687,11 @@ export function JournalPanel({
                     disableSystemKeyboard={disableSystemKeyboard}
                   />
                 </td>
-                <td className={entry.closeLine ? "journal-close-line-cell" : undefined}>
-                  <input
-                    value={entry.description}
-                    inputMode={disableSystemKeyboard ? "none" : "text"}
-                    readOnly={disableSystemKeyboard}
-                    onChange={(event) => {
-                      console.log('📝 Description onChange called with:', event.target.value);
-                      onUpdateEntry(entry.id, { description: event.target.value });
-                    }}
-                    onDoubleClick={(event) => {
-                      console.log('📝 Description onDoubleClick called');
-                      // Espone la funzione onUpdateEntry per la tastiera virtuale
-                      const target = event.target as HTMLInputElement;
-                      (target as any)._onUpdateEntry = (value: string) => {
-                        console.log('📝 Direct onUpdateEntry called with:', value);
-                        onUpdateEntry(entry.id, { description: value });
-                      };
-                      
-                      if (onOpenVirtualKeyboard) {
-                        onOpenVirtualKeyboard(target, 'description');
-                      }
-                    }}
-                    onBlur={(event) => {
-                      console.log('📝 Description onBlur called with:', event.target.value);
-                      // Rimuove la funzione esposta quando il campo perde focus
-                      delete (event.target as any)._onUpdateEntry;
-                    }}
-                    placeholder="Descrizione"
-                    title="Doppio click per aprire la tastiera virtuale"
-                    style={{ cursor: 'pointer' }}
-                  />
-                </td>
                 <td className="journal-amount-cell">
                   <input
                     value={entry.debit}
-                    inputMode="decimal"
+                    inputMode={disableSystemKeyboard ? "none" : "decimal"}
+                    readOnly={disableSystemKeyboard}
                     data-entry-id={entry.id}
                     data-field="debit"
                     onChange={(event) => {
@@ -741,7 +710,8 @@ export function JournalPanel({
                 <td className="journal-amount-cell">
                   <input
                     value={entry.credit}
-                    inputMode="decimal"
+                    inputMode={disableSystemKeyboard ? "none" : "decimal"}
+                    readOnly={disableSystemKeyboard}
                     data-entry-id={entry.id}
                     data-field="credit"
                     onChange={(event) => {
