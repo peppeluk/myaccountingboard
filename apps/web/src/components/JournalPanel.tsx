@@ -119,10 +119,18 @@ function formatAmountForDisplay(rawValue: string): string {
   return amountFormatter.format(parsed);
 }
 
+function isCoarsePointerDevice(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+  return window.matchMedia("(pointer: coarse)").matches;
+}
+
 function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboard, disableSystemKeyboard }: AccountPickerProps) {
   const [query, setQuery] = useState(entry.accountName);
   const [isOpen, setIsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const useTapForVirtualKeyboard = Boolean(disableSystemKeyboard && onOpenVirtualKeyboard && isCoarsePointerDevice());
   
   // Ref per memorizzare la funzione handleInputChange in modo che possa essere chiamata esternamente
   const handleInputChangeRef = useRef<(value: string) => void>();
@@ -229,6 +237,17 @@ function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboa
     handleInputChangeRef.current = handleInputChange;
   }, [handleInputChange]);
 
+  const openAccountVirtualKeyboard = (target: HTMLInputElement) => {
+    if (!onOpenVirtualKeyboard) {
+      return;
+    }
+    (target as any)._handleInputChange = (value: string) => {
+      console.log('🔍 Direct handleInputChange called with:', value);
+      handleInputChange(value);
+    };
+    onOpenVirtualKeyboard(target, 'account');
+  };
+
   return (
     <div className="account-picker" ref={rootRef}>
       <input
@@ -251,16 +270,13 @@ function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboa
           }
         }}
         onDoubleClick={(event) => {
-          console.log('🔍 AccountPicker onDoubleClick called');
-          // Espone la funzione handleInputChange per la tastiera virtuale
-          const target = event.target as HTMLInputElement;
-          (target as any)._handleInputChange = (value: string) => {
-            console.log('🔍 Direct handleInputChange called with:', value);
-            handleInputChange(value);
-          };
-          
-          if (onOpenVirtualKeyboard) {
-            onOpenVirtualKeyboard(target, 'account');
+          if (!useTapForVirtualKeyboard) {
+            openAccountVirtualKeyboard(event.currentTarget);
+          }
+        }}
+        onClick={(event) => {
+          if (useTapForVirtualKeyboard) {
+            openAccountVirtualKeyboard(event.currentTarget);
           }
         }}
         onBlur={(event) => {
@@ -270,7 +286,7 @@ function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboa
           delete (target as any)._handleInputChange;
         }}
         placeholder="Cerca conto..."
-        title="Doppio click per aprire la tastiera virtuale"
+        title={useTapForVirtualKeyboard ? "Tocca per aprire la tastiera virtuale" : "Doppio click per aprire la tastiera virtuale"}
         style={{ cursor: 'pointer' }}
       />
       {isOpen && (
@@ -334,6 +350,7 @@ export function JournalPanel({
   
   // Flag per prevenire esecuzioni multiple
   const isProcessingClickRef = useRef(false);
+  const useTapForMobileInputs = Boolean(disableSystemKeyboard && isCoarsePointerDevice());
 
   // Funzione per evidenziare il campo selezionato
   const highlightSelectedField = (entryId: string, field: 'debit' | 'credit') => {
@@ -449,40 +466,28 @@ export function JournalPanel({
         // Ottieni il valore corrente del display della calcolatrice
         const calculatorInput = document.querySelector('.calculator input') as HTMLInputElement;
         const currentDisplay = calculatorInput ? calculatorInput.value : '';
-        
-        // Controllo estremamente rigoroso
+        const trimmedDisplay = currentDisplay.trim();
         const numericValue = parseFloat(calculatorValue);
-        const hasOperator = /[+\-*/]/.test(currentDisplay);
-        const displayIsEmpty = currentDisplay.trim() === '';
-        const displayHasOnlyZero = currentDisplay.trim() === '0';
-        const displayEndsWithOperator = /[+\-*/]$/.test(currentDisplay);
-        const displayHasResult = currentDisplay.includes('='); // Contiene già un risultato
         const fieldIsEmpty = calculatorValue.trim() === '';
         const fieldIsNaN = isNaN(numericValue);
-        
-        // Logica definitiva: aggiungi "+" solo in casi molto specifici
-        const shouldAddPlus = 
-          !fieldIsEmpty && // Campo non vuoto
-          !fieldIsNaN && // Valore non NaN
-          !displayIsEmpty && // Display non vuoto
-          !displayEndsWithOperator && // Non termina con operatore
-          !displayHasResult && // Non contiene già un risultato
-          !displayHasOnlyZero && // Non è solo zero
-          (hasOperator || numericValue !== 0); // Ha operatore OPPURE valore non-zero
-        
-        if (shouldAddPlus) {
-          // Costruisci il nuovo valore con + e invialo come set-value
-          const newValue = `${currentDisplay}+${calculatorValue}`;
+        const displayHasResult = trimmedDisplay.includes('=');
+        const displayIsEmpty = trimmedDisplay === '';
+        const displayHasOnlyZero = trimmedDisplay === '0';
+        const displayEndsWithOperator = /[+\-*/(]$/.test(trimmedDisplay);
+
+        const setCalculatorValue = (nextValue: string) => {
           const event = new CustomEvent('calculator-set-value', {
-            detail: { value: newValue }
+            detail: { value: nextValue }
           });
           window.dispatchEvent(event);
+        };
+
+        if (fieldIsEmpty || fieldIsNaN || displayIsEmpty || displayHasOnlyZero || displayHasResult) {
+          setCalculatorValue(calculatorValue);
+        } else if (displayEndsWithOperator) {
+          setCalculatorValue(`${trimmedDisplay}${calculatorValue}`);
         } else {
-          // Emetti evento per impostare il valore senza +
-          const event = new CustomEvent('calculator-set-value', {
-            detail: { value: calculatorValue }
-          });
-          window.dispatchEvent(event);
+          setCalculatorValue(`${trimmedDisplay}+${calculatorValue}`);
         }
         
         // Resetta il flag dopo l'elaborazione
@@ -697,14 +702,25 @@ export function JournalPanel({
                       onUpdateEntry(entry.id, { description: event.target.value });
                     }}
                     onDoubleClick={(event) => {
-                      console.log('📝 Description onDoubleClick called');
-                      // Espone la funzione onUpdateEntry per la tastiera virtuale
-                      const target = event.target as HTMLInputElement;
+                      if (useTapForMobileInputs) {
+                        return;
+                      }
+                      const target = event.currentTarget;
                       (target as any)._onUpdateEntry = (value: string) => {
-                        console.log('📝 Direct onUpdateEntry called with:', value);
                         onUpdateEntry(entry.id, { description: value });
                       };
-                      
+                      if (onOpenVirtualKeyboard) {
+                        onOpenVirtualKeyboard(target, 'description');
+                      }
+                    }}
+                    onClick={(event) => {
+                      if (!useTapForMobileInputs) {
+                        return;
+                      }
+                      const target = event.currentTarget;
+                      (target as any)._onUpdateEntry = (value: string) => {
+                        onUpdateEntry(entry.id, { description: value });
+                      };
                       if (onOpenVirtualKeyboard) {
                         onOpenVirtualKeyboard(target, 'description');
                       }
@@ -715,7 +731,7 @@ export function JournalPanel({
                       delete (event.target as any)._onUpdateEntry;
                     }}
                     placeholder="Descrizione"
-                    title="Doppio click per aprire la tastiera virtuale"
+                    title={useTapForMobileInputs ? "Tocca per aprire la tastiera virtuale" : "Doppio click per aprire la tastiera virtuale"}
                     style={{ cursor: 'pointer' }}
                   />
                 </td>
@@ -732,10 +748,10 @@ export function JournalPanel({
                     onBlur={() => {
                       onUpdateEntry(entry.id, { debit: formatAmountForDisplay(entry.debit) });
                     }}
-                    onClick={handleAmountSingleClick}
-                    onDoubleClick={handleAmountClick}
+                    onClick={useTapForMobileInputs ? handleAmountClick : handleAmountSingleClick}
+                    onDoubleClick={useTapForMobileInputs ? undefined : handleAmountClick}
                     placeholder="0,00"
-                    title="Doppio click per inserire nella calcolatrice"
+                    title={useTapForMobileInputs ? "Tocca per inserire nella calcolatrice" : "Doppio click per inserire nella calcolatrice"}
                     style={{ cursor: 'pointer' }}
                   />
                 </td>
@@ -752,10 +768,10 @@ export function JournalPanel({
                     onBlur={() => {
                       onUpdateEntry(entry.id, { credit: formatAmountForDisplay(entry.credit) });
                     }}
-                    onClick={handleAmountSingleClick}
-                    onDoubleClick={handleAmountClick}
+                    onClick={useTapForMobileInputs ? handleAmountClick : handleAmountSingleClick}
+                    onDoubleClick={useTapForMobileInputs ? undefined : handleAmountClick}
                     placeholder="0,00"
-                    title="Doppio click per inserire nella calcolatrice"
+                    title={useTapForMobileInputs ? "Tocca per inserire nella calcolatrice" : "Doppio click per inserire nella calcolatrice"}
                     style={{ cursor: 'pointer' }}
                   />
                 </td>

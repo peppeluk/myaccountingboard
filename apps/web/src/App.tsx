@@ -314,7 +314,13 @@ function App() {
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
   const [display, setDisplay] = useState("");
   const [isVirtualKeyboardOpen, setIsVirtualKeyboardOpen] = useState(false);
-  const [disableSystemKeyboard, setDisableSystemKeyboard] = useState(true); // Default disabilitato
+  const [disableSystemKeyboard, setDisableSystemKeyboard] = useState(() => {
+    // Su dispositivi touch è più pratico avere la tastiera nativa attiva di default.
+    if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+      return !window.matchMedia("(pointer: coarse)").matches;
+    }
+    return true;
+  });
   const [keyboardTarget, setKeyboardTarget] = useState<{ element: HTMLInputElement; field: string } | null>(null);
   const [isCanvasReady, setIsCanvasReady] = useState(false);
   const [virtualWindowRange, setVirtualWindowRange] = useState<VirtualWindowRange>({ startIndex: 0, endIndex: 0 });
@@ -334,6 +340,8 @@ function App() {
   const selectionCanvasRefCallbacksRef = useRef<Map<number, (node: HTMLCanvasElement | null) => void>>(new Map());
   const pageSentinelRefCallbacksRef = useRef<Map<string, (node: HTMLDivElement | null) => void>>(new Map());
   const eraserPreviewRef = useRef<HTMLDivElement | null>(null);
+  const calculatorInputRef = useRef<HTMLInputElement | null>(null);
+  const calculatorSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
   const fabricCanvasMapRef = useRef<Map<number, FabricCanvas>>(new Map());
   const pageSlotMapRef = useRef<Map<string, number>>(new Map());
@@ -2863,6 +2871,53 @@ function App() {
     }
   }, [display, solveDisplayExpression]);
 
+  const syncCalculatorSelection = useCallback(() => {
+    const input = calculatorInputRef.current;
+    if (!input) {
+      return;
+    }
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    calculatorSelectionRef.current = { start, end };
+  }, []);
+
+  const setCalculatorCaretPosition = useCallback((position: number) => {
+    const nextPosition = Math.max(0, position);
+    calculatorSelectionRef.current = { start: nextPosition, end: nextPosition };
+    window.requestAnimationFrame(() => {
+      const input = calculatorInputRef.current;
+      if (!input) {
+        return;
+      }
+      input.setSelectionRange(nextPosition, nextPosition);
+    });
+  }, []);
+
+  const handleCalculatorBackspace = useCallback(() => {
+    setDisplay((previous) => {
+      const input = calculatorInputRef.current;
+      const fallbackStart = Math.min(calculatorSelectionRef.current.start, previous.length);
+      const fallbackEnd = Math.min(calculatorSelectionRef.current.end, previous.length);
+      const start = input?.selectionStart ?? fallbackStart;
+      const end = input?.selectionEnd ?? fallbackEnd;
+
+      if (start !== end) {
+        const nextValue = `${previous.slice(0, start)}${previous.slice(end)}`;
+        setCalculatorCaretPosition(start);
+        return nextValue;
+      }
+
+      if (start <= 0) {
+        return previous;
+      }
+
+      const nextPosition = start - 1;
+      const nextValue = `${previous.slice(0, nextPosition)}${previous.slice(start)}`;
+      setCalculatorCaretPosition(nextPosition);
+      return nextValue;
+    });
+  }, [setCalculatorCaretPosition]);
+
   // Gestione click fuori dalla calcolatrice
   useEffect(() => {
     if (!isCalculatorOpen) return;
@@ -5224,13 +5279,20 @@ function App() {
             </button>
           </header>
           <input
+            ref={calculatorInputRef}
             value={display}
             onChange={(event) => setDisplay(event.target.value)}
+            onClick={syncCalculatorSelection}
+            onSelect={syncCalculatorSelection}
+            onKeyUp={syncCalculatorSelection}
+            onMouseUp={syncCalculatorSelection}
+            onFocus={syncCalculatorSelection}
+            onBlur={syncCalculatorSelection}
             placeholder="Espressione"
             readOnly
           />
           <div className="calculator-grid">
-            {["7", "8", "9", "/", "⌫", "4", "5", "6", "*", "C", "1", "2", "3", "-", "(", "0", ".", "+", ")"].map(
+            {["7", "8", "9", "/", "\u232B", "4", "5", "6", "*", "C", "1", "2", "3", "-", "(", "0", ".", "+", ")"].map(
               (item) => (
                 <button
                   key={item}
@@ -5238,13 +5300,18 @@ function App() {
                   onClick={() => {
                     if (item === "C") {
                       setDisplay("");
+                      setCalculatorCaretPosition(0);
                       return;
                     }
-                    if (item === "⌫") {
-                      setDisplay((previous) => previous.slice(0, -1));
+                    if (item === "\u232B") {
+                      handleCalculatorBackspace();
                       return;
                     }
-                    setDisplay((previous) => previous + item);
+                    setDisplay((previous) => {
+                      const nextValue = `${previous}${item}`;
+                      setCalculatorCaretPosition(nextValue.length);
+                      return nextValue;
+                    });
                   }}
                 >
                   {item}
