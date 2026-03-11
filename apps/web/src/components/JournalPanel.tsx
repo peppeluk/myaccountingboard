@@ -641,14 +641,17 @@ export function JournalPanel({
                     onClick={() => {
                       const dateInput = document.querySelector(`#journal-date-${entry.id}`) as HTMLInputElement;
                       if (dateInput) {
-                        dateInput.style.opacity = '1';
-                        dateInput.style.pointerEvents = 'auto';
-                        dateInput.showPicker();
+                        dateInput.style.opacity = '0';
+                        dateInput.style.pointerEvents = 'none';
+                        if (typeof dateInput.showPicker === "function") {
+                          dateInput.showPicker();
+                        } else {
+                          dateInput.focus();
+                          dateInput.click();
+                        }
                         
                         // Gestisci sia change che input events
                         const handleDateChange = () => {
-                          dateInput.style.opacity = '0';
-                          dateInput.style.pointerEvents = 'none';
                           // Forza un re-render del componente
                           onUpdateEntry(entry.id, { date: dateInput.value });
                         };
@@ -656,12 +659,6 @@ export function JournalPanel({
                         dateInput.addEventListener('change', handleDateChange, { once: true });
                         dateInput.addEventListener('input', handleDateChange, { once: true });
                         
-                        // Fallback: chiudi dopo un ritardo
-                        setTimeout(() => {
-                          if (dateInput.style.opacity === '1') {
-                            handleDateChange();
-                          }
-                        }, 100);
                       }
                     }}
                     style={{ 
@@ -804,30 +801,32 @@ export function JournalPanel({
       </div>
 
       <footer className="journal-panel-footer">
-        <div className="journal-profile-selector">
-          <label htmlFor="journal-profile-select">Piano dei conti</label>
-          <select
-            id="journal-profile-select"
-            value={selectedProfileId}
-            onChange={(event) => onChangeProfile(event.target.value as JournalProfileId)}
-          >
-            {profileOptions.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="journal-panel-actions journal-panel-actions-bottom">
-          <button type="button" onClick={onAddEntry}>
-            + Riga
-          </button>
-          <button type="button" onClick={onClearEntries}>
-            Svuota
-          </button>
-          <button type="button" onClick={onExtract} disabled={isExtracting}>
-            {isExtracting ? "Estrazione..." : "Estrai .xlsx"}
-          </button>
+        <div className="journal-panel-footer-row">
+          <div className="journal-panel-actions journal-panel-actions-bottom">
+            <button type="button" onClick={onAddEntry}>
+              + Riga
+            </button>
+            <button type="button" onClick={onClearEntries}>
+              Svuota
+            </button>
+            <button type="button" onClick={onExtract} disabled={isExtracting}>
+              {isExtracting ? "Estrazione..." : "Estrai .xlsx"}
+            </button>
+            <div className="journal-profile-inline">
+              <label htmlFor="journal-profile-select">Piano dei conti</label>
+              <select
+                id="journal-profile-select"
+                value={selectedProfileId}
+                onChange={(event) => onChangeProfile(event.target.value as JournalProfileId)}
+              >
+                {profileOptions.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         </div>
         <p>
           Il campo E usa il piano dei conti del profilo selezionato. Il file estratto aggiorna il foglio tecnico
