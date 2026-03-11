@@ -6,7 +6,7 @@ import {
   getJournalProfileOption,
   type JournalProfileId
 } from "./data/journalProfiles";
-import { exportJournalWorkbook } from "./lib/api";
+import { exportJournalWorkbook, fetchExerciseResponses, fetchExercises } from "./lib/api";
 import { lazyImportFabric, lazyImportTesseract, lazyImportJsPDF, type FabricCanvas, type FabricLine, type FabricObject } from "./lib/lazyImports";
 import { normalizeExpression, formatExpressionForDisplay, normalizeOcrChunk, validateExpression, evaluateExpressionNative } from "./utils/ocrUtils";
 import { mergeRecognizedText, formatArchiveDateTime, buildDocumentBaseName, normalizePageCanvasDataForPages, computeVirtualWindowRange, buildIndexRange } from "./utils/appUtils";
@@ -24,11 +24,15 @@ import {
   type ArchivedBoardDocument,
   type BoardDocument
 } from "./lib/boardStorage";
+import { isSupabaseConfigured, supabase } from "./lib/supabaseClient";
 import { waitForSaveComplete } from "./lib/saveManager";
 
 type Tool = "pen" | "eraser" | "line" | "pan";
 type SizeLevel = "thin" | "medium" | "large";
 type BackgroundMode = "plain" | "grid";
+
+const IS_TEACHER_MODE = import.meta.env.VITE_TEACHER_MODE === "true";
+const TEACHER_TOKEN = import.meta.env.VITE_TEACHER_TOKEN;
 
 type Page = {
   id: string;
@@ -38,6 +42,21 @@ type Page = {
 type PageCanvasDataMap = Record<string, string | null>;
 
 type PersistedDocument = BoardDocument;
+
+type ExerciseSummary = {
+  id: string;
+  title: string | null;
+  createdAt: string | null;
+};
+
+type ExerciseResponseEntry = {
+  id: string;
+  exerciseId: string;
+  studentName: string | null;
+  createdAt: string;
+  journalEntries: JournalEntry[];
+  boardJson: unknown;
+};
 
 type ToolHandlers = {
   down?: (event: unknown) => void;
@@ -270,6 +289,19 @@ function loadInitialDocument(): PersistedDocument {
   };
 }
 
+function getExerciseViewFlags() {
+  if (typeof window === "undefined") {
+    return { isExerciseLinkView: false, isExerciseResponsesPage: false };
+  }
+  const pathname = window.location.pathname;
+  const isExercisePath = /^\/exercise\/[^/]+$/.test(pathname);
+  const isResponsesPage = pathname === "/responses";
+  return {
+    isExerciseLinkView: isExercisePath,
+    isExerciseResponsesPage: isResponsesPage
+  };
+}
+
 function App() {
   const initialDocumentRef = useRef<PersistedDocument>(loadInitialDocument());
   const initialPageCanvasDataRef = useRef<PageCanvasDataMap>(
@@ -299,6 +331,20 @@ function App() {
   const [archiveSearch, setArchiveSearch] = useState("");
   const [isArchiveLoading, setIsArchiveLoading] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState("");
+  const [exerciseCatalog, setExerciseCatalog] = useState<ExerciseSummary[]>([]);
+  const [exerciseCatalogMessage, setExerciseCatalogMessage] = useState("");
+  const [exerciseCatalogLoading, setExerciseCatalogLoading] = useState(false);
+  const [expandedExerciseIds, setExpandedExerciseIds] = useState<Set<string>>(() => new Set());
+  const [exerciseResponsesByExerciseId, setExerciseResponsesByExerciseId] = useState<
+    Record<string, ExerciseResponseEntry[]>
+  >({});
+  const [exerciseResponsesMessageByExerciseId, setExerciseResponsesMessageByExerciseId] = useState<
+    Record<string, string>
+  >({});
+  const [exerciseResponsesLoadingByExerciseId, setExerciseResponsesLoadingByExerciseId] = useState<
+    Record<string, boolean>
+  >({});
+  const [selectedExerciseResponseId, setSelectedExerciseResponseId] = useState<string | null>(null);
   const [isJournalExtracting, setIsJournalExtracting] = useState(false);
   const [selectedJournalProfileId, setSelectedJournalProfileId] = useState<JournalProfileId>(
     DEFAULT_JOURNAL_PROFILE_ID
@@ -308,6 +354,13 @@ function App() {
   const [isSharingFiles, setIsSharingFiles] = useState(false);
   const [isPdfExporting, setIsPdfExporting] = useState(false);  // 🎯 Loading per PDF
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [sharedExerciseId, setSharedExerciseId] = useState<string | null>(null);
+  const initialExerciseView = getExerciseViewFlags();
+  const [isExerciseLinkView, setIsExerciseLinkView] = useState(initialExerciseView.isExerciseLinkView);
+  const [isExerciseResponsesPage, setIsExerciseResponsesPage] = useState(
+    initialExerciseView.isExerciseResponsesPage
+  );
+  const [isExerciseResponseSaving, setIsExerciseResponseSaving] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
     () => initialDocumentRef.current.journalEntries
   );
@@ -1520,6 +1573,157 @@ function App() {
     [loadArchiveEntries, setActiveArchiveDocumentId]
   );
 
+  const loadExerciseCatalog = useCallback(async () => {
+    if (!IS_TEACHER_MODE) {
+      setExerciseCatalogMessage("Risposte disponibili solo in modalità docente.");
+      setExerciseCatalog([]);
+      return;
+    }
+    setExerciseCatalogLoading(true);
+    setExerciseCatalogMessage("");
+    try {
+      const data = await fetchExercises(TEACHER_TOKEN);
+      const normalized = (data ?? []).map((row) => ({
+        id: String(row.id),
+        title: row.title ?? null,
+        createdAt: row.created_at ?? null
+      }));
+      setExerciseCatalog(normalized);
+      if (!normalized.length) {
+        setExerciseCatalogMessage("Nessun esercizio presente.");
+      }
+    } catch (error) {
+      console.error("Errore caricamento esercizi:", error);
+      const reason = error instanceof Error ? error.message : String(error);
+      setExerciseCatalogMessage(`Caricamento esercizi fallito: ${reason}`);
+    } finally {
+      setExerciseCatalogLoading(false);
+    }
+  }, []);
+
+  const loadExerciseResponsesForExercise = useCallback(async (exerciseId: string) => {
+    if (!IS_TEACHER_MODE) {
+      setExerciseResponsesMessageByExerciseId((current) => ({
+        ...current,
+        [exerciseId]: "Risposte disponibili solo in modalità docente."
+      }));
+      setExerciseResponsesByExerciseId((current) => ({
+        ...current,
+        [exerciseId]: []
+      }));
+      return;
+    }
+    setExerciseResponsesLoadingByExerciseId((current) => ({
+      ...current,
+      [exerciseId]: true
+    }));
+    setExerciseResponsesMessageByExerciseId((current) => ({
+      ...current,
+      [exerciseId]: ""
+    }));
+    try {
+      const data = await fetchExerciseResponses(exerciseId, TEACHER_TOKEN);
+      const normalized = (data ?? []).map((row) => {
+        return {
+          id: row.id,
+          exerciseId: row.exercise_id,
+          studentName: row.student_name ?? null,
+          createdAt: row.created_at,
+          journalEntries: normalizeJournalEntries(row.journal_entries),
+          boardJson: row.board_json
+        };
+      });
+      setExerciseResponsesByExerciseId((current) => ({
+        ...current,
+        [exerciseId]: normalized
+      }));
+      if (!normalized.length) {
+        setExerciseResponsesMessageByExerciseId((current) => ({
+          ...current,
+          [exerciseId]: "Nessuna risposta ricevuta."
+        }));
+      }
+      setSelectedExerciseResponseId((current) => {
+        if (!normalized.length) {
+          return current;
+        }
+        if (current && normalized.some((entry) => entry.id === current)) {
+          return current;
+        }
+        return normalized[0].id;
+      });
+    } catch (error) {
+      console.error("Errore caricamento risposte:", error);
+      const reason = error instanceof Error ? error.message : String(error);
+      setExerciseResponsesMessageByExerciseId((current) => ({
+        ...current,
+        [exerciseId]: `Caricamento risposte fallito: ${reason}`
+      }));
+    } finally {
+      setExerciseResponsesLoadingByExerciseId((current) => ({
+        ...current,
+        [exerciseId]: false
+      }));
+    }
+  }, []);
+
+  const toggleExerciseResponsesForExercise = useCallback(
+    (exerciseId: string) => {
+      setExpandedExerciseIds((current) => {
+        const next = new Set(current);
+        if (next.has(exerciseId)) {
+          next.delete(exerciseId);
+        } else {
+          next.add(exerciseId);
+        }
+        return next;
+      });
+      if (!exerciseResponsesByExerciseId[exerciseId]) {
+        void loadExerciseResponsesForExercise(exerciseId);
+      }
+    },
+    [exerciseResponsesByExerciseId, loadExerciseResponsesForExercise]
+  );
+
+  const copyExerciseLink = useCallback(async (exerciseId: string) => {
+    const linkPath = `/exercise/${encodeURIComponent(exerciseId)}`;
+    const link = `${window.location.origin}${linkPath}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      window.alert("Link esercizio copiato");
+    } catch {
+      window.alert(`Link esercizio: ${link}`);
+    }
+  }, []);
+
+  const openExerciseLink = useCallback((exerciseId: string) => {
+    const linkPath = `/exercise/${encodeURIComponent(exerciseId)}`;
+    const link = `${window.location.origin}${linkPath}`;
+    const newTab = window.open(link, "_blank", "noopener,noreferrer");
+    if (!newTab) {
+      window.location.assign(link);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isExerciseResponsesPage) {
+      return;
+    }
+    if (!IS_TEACHER_MODE) {
+      return;
+    }
+    void loadExerciseCatalog();
+  }, [isExerciseResponsesPage, loadExerciseCatalog]);
+
+  const openExerciseResponseLink = useCallback((response: ExerciseResponseEntry) => {
+    const linkPath = `/exercise/${encodeURIComponent(response.exerciseId)}`;
+    const link = `${window.location.origin}${linkPath}?responseId=${encodeURIComponent(response.id)}`;
+    const newTab = window.open(link, "_blank", "noopener,noreferrer");
+    if (!newTab) {
+      window.location.assign(link);
+    }
+  }, []);
+
   const renameArchiveDocument = useCallback(
     async (archiveId: string, currentFileName: string) => {
       const defaultName = currentFileName.replace(/\.mbd$/i, "");
@@ -2363,6 +2567,10 @@ function App() {
     () => getJournalProfileOption(selectedJournalProfileId),
     [selectedJournalProfileId]
   );
+  const showTeacherExerciseMenu = IS_TEACHER_MODE && !isExerciseLinkView && !isExerciseResponsesPage;
+  const showShareActions = showTeacherExerciseMenu;
+  const showExerciseResponsesButton = showTeacherExerciseMenu;
+  const showStudentSubmitButton = Boolean(sharedExerciseId) && (isExerciseLinkView || !IS_TEACHER_MODE);
 
   const buildJournalExportPayload = useCallback(
     () =>
@@ -2672,6 +2880,11 @@ function App() {
 
   const updateJournalEntry = useCallback((entryId: string, patch: Partial<JournalEntry>) => {
     setJournalEntries((previous) => {
+      const currentIndex = previous.findIndex((entry) => entry.id === entryId);
+      if (currentIndex === -1) {
+        return previous;
+      }
+      const previousDate = previous[currentIndex]?.date ?? "";
       const updated = previous.map((entry) => {
         if (entry.id !== entryId) {
           return entry;
@@ -2682,18 +2895,24 @@ function App() {
         };
       });
 
-      // Se la data è stata aggiornata O se è stata attivata la linea di chiusura O se è stato inserito importo, 
+      // Se la data e' stata aggiornata o se e' stata attivata la linea di chiusura o se e' stato inserito importo,
       // copia alla riga successiva se vuota
-      if (patch.date || patch.closeLine || patch.debit || patch.credit) {
-        const currentIndex = updated.findIndex(entry => entry.id === entryId);
+      if ("date" in patch || patch.closeLine || patch.debit || patch.credit) {
         const nextIndex = currentIndex + 1;
-        
-        if (nextIndex < updated.length && !updated[nextIndex].date) {
+
+        if (nextIndex < updated.length) {
           const currentEntry = updated[currentIndex];
-          updated[nextIndex] = {
-            ...updated[nextIndex],
-            date: currentEntry.date
-          };
+          const nextEntry = updated[nextIndex];
+          const shouldPropagateDate = "date" in patch
+            ? !nextEntry.date || nextEntry.date === previousDate
+            : !nextEntry.date;
+
+          if (shouldPropagateDate) {
+            updated[nextIndex] = {
+              ...nextEntry,
+              date: currentEntry.date
+            };
+          }
         }
       }
 
@@ -2717,6 +2936,240 @@ function App() {
       setIsJournalExtracting(false);
     }
   }, [buildJournalWorkbookBlob, downloadBlob]);
+
+  const createExercise = useCallback(async () => {
+    try {
+      if (!isSupabaseConfigured || !supabase) {
+        window.alert("Configura VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY");
+        return;
+      }
+
+      const canvas = getActiveCanvas();
+      if (!canvas) {
+        window.alert("Canvas non disponibile");
+        return;
+      }
+
+      const exerciseName = window.prompt("Nome esercizio")?.trim();
+      if (exerciseName === undefined) {
+        return;
+      }
+      if (!exerciseName) {
+        window.alert("Nome esercizio obbligatorio");
+        return;
+      }
+
+      const board = canvas.toJSON();
+      const exercise = {
+        title: exerciseName,
+        board_json: board,
+        journal_template: journalEntries
+      };
+
+      const { data, error } = await supabase
+        .from("exercises")
+        .insert([exercise])
+        .select()
+        .single();
+
+      if (error || !data) {
+        throw error ?? new Error("Inserimento esercizio fallito");
+      }
+
+      const exerciseId = String((data as { id: string | number }).id);
+      const linkPath = `/exercise/${exerciseId}`;
+      const link = `${window.location.origin}${linkPath}`;
+      await navigator.clipboard.writeText(link);
+      setSharedExerciseId(exerciseId);
+
+      window.alert("Link esercizio copiato");
+    } catch (error) {
+      console.error("Errore creazione esercizio:", error);
+      window.alert("Impossibile condividere l'esercizio");
+    }
+  }, [getActiveCanvas, journalEntries]);
+
+  const openExerciseResponsesTab = useCallback(() => {
+    const link = `${window.location.origin}/responses`;
+    const newTab = window.open(link, "_blank", "noopener,noreferrer");
+    if (!newTab) {
+      window.location.assign(link);
+    }
+  }, []);
+
+  const submitExerciseResponse = useCallback(async () => {
+    try {
+      if (!isSupabaseConfigured || !supabase) {
+        window.alert("Configura VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY");
+        return;
+      }
+      if (!sharedExerciseId) {
+        window.alert("Esercizio non valido");
+        return;
+      }
+
+      const studentName = window.prompt("Nome studente (opzionale)")?.trim() ?? "";
+      setIsExerciseResponseSaving(true);
+
+      const canvas = getActiveCanvas();
+      if (!canvas) {
+        window.alert("Canvas non disponibile");
+        return;
+      }
+
+      const responseId = typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : null;
+      const payload = {
+        id: responseId ?? undefined,
+        exercise_id: sharedExerciseId,
+        student_name: studentName || null,
+        board_json: canvas.toJSON(),
+        journal_entries: journalEntries
+      };
+
+      const { error } = await supabase
+        .from("exercise_responses")
+        .insert([payload]);
+
+      if (error) {
+        throw error;
+      }
+
+      if (!responseId) {
+        window.alert("Risposta inviata.");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(responseId);
+        window.alert("Risposta inviata. ID risposta copiato");
+      } catch {
+        window.alert(`Risposta inviata. ID risposta: ${responseId}`);
+      }
+    } catch (error) {
+      console.error("Errore invio risposta:", error);
+      const fallbackReason = error instanceof Error ? error.message : String(error);
+      const richError =
+        error && typeof error === "object"
+          ? [
+              "message" in error ? (error as { message?: unknown }).message : null,
+              "details" in error ? (error as { details?: unknown }).details : null,
+              "hint" in error ? (error as { hint?: unknown }).hint : null,
+              "code" in error ? (error as { code?: unknown }).code : null
+            ]
+              .filter((value): value is NonNullable<unknown> => value !== null && value !== undefined)
+              .map((value) => String(value))
+              .join(" | ")
+          : "";
+      const reason = richError || fallbackReason;
+      window.alert(`Impossibile inviare la risposta.\n\nDettaglio: ${reason}`);
+    } finally {
+      setIsExerciseResponseSaving(false);
+    }
+  }, [getActiveCanvas, journalEntries, sharedExerciseId]);
+
+  const loadExerciseFromUrl = useCallback(async (): Promise<boolean> => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    if (window.location.pathname === "/responses") {
+      setIsExerciseResponsesPage(true);
+      setIsExerciseLinkView(false);
+      return true;
+    }
+
+    const match = window.location.pathname.match(/^\/exercise\/([^/]+)$/);
+    if (!match) {
+      setIsExerciseLinkView(false);
+      setIsExerciseResponsesPage(false);
+      return false;
+    }
+
+    const exerciseId = decodeURIComponent(match[1] ?? "").trim();
+    if (!exerciseId) {
+      setIsExerciseLinkView(false);
+      setIsExerciseResponsesPage(false);
+      return false;
+    }
+
+    setIsExerciseResponsesPage(false);
+    setIsExerciseLinkView(true);
+    setSharedExerciseId(exerciseId);
+
+    if (!isSupabaseConfigured || !supabase) {
+      setOcrStatus("Supabase non configurato: impossibile caricare esercizio");
+      return true;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from("exercises")
+        .select("board_json, journal_template")
+        .eq("id", exerciseId)
+        .single();
+
+      if (error || !data) {
+        setOcrStatus("Esercizio non trovato");
+        return false;
+      }
+      const parsed = data as {
+        board_json?: unknown;
+        journal_template?: unknown;
+      };
+
+      const responseId = new URLSearchParams(window.location.search).get("responseId")?.trim();
+      if (responseId && IS_TEACHER_MODE) {
+        try {
+          const responses = await fetchExerciseResponses(exerciseId, TEACHER_TOKEN);
+          const match = (responses ?? []).find((entry) => entry.id === responseId);
+          if (match) {
+            const page = createPage(0);
+            const responseSnapshot =
+              match.board_json && typeof match.board_json === "object"
+                ? JSON.stringify(match.board_json)
+                : typeof match.board_json === "string"
+                  ? match.board_json
+                  : null;
+            const responseDocument: PersistedDocument = {
+              pages: [page],
+              canvasData: responseSnapshot,
+              pageCanvasData: { [page.id]: responseSnapshot },
+              journalEntries: ensureMinimumJournalEntries(normalizeJournalEntries(match.journal_entries))
+            };
+            await applyPersistedDocument(responseDocument);
+            setOcrStatus(`Risposta caricata (${match.student_name ?? "Studente"})`);
+            return true;
+          }
+          setOcrStatus("Risposta non trovata");
+        } catch (error) {
+          console.error("Errore caricamento risposta da URL:", error);
+          setOcrStatus("Errore caricamento risposta");
+        }
+      }
+
+      const page = createPage(0);
+      const boardSnapshot =
+        parsed.board_json && typeof parsed.board_json === "object"
+          ? JSON.stringify(parsed.board_json)
+          : null;
+
+      const exerciseDocument: PersistedDocument = {
+        pages: [page],
+        canvasData: boardSnapshot,
+        pageCanvasData: { [page.id]: boardSnapshot },
+        journalEntries: normalizeJournalEntries(parsed.journal_template)
+      };
+
+      await applyPersistedDocument(exerciseDocument);
+      setOcrStatus(`Esercizio caricato (${exerciseId})`);
+      return true;
+    } catch (error) {
+      console.error("Errore caricamento esercizio da URL:", error);
+      setOcrStatus("Errore caricamento esercizio");
+      return false;
+    }
+  }, [applyPersistedDocument]);
 
   const shareBoardAndJournal = useCallback(async () => {
     setIsSharingFiles(true);
@@ -4185,6 +4638,14 @@ function App() {
     let cancelled = false;
     void (async () => {
       try {
+        const hasLoadedExercise = await loadExerciseFromUrl();
+        if (cancelled) {
+          return;
+        }
+        if (hasLoadedExercise) {
+          return;
+        }
+
         const [indexedDocument, appSettings] = await Promise.all([
           loadLastBoardDocument(),
           loadAppSettings()
@@ -4214,7 +4675,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [applyPersistedDocument]);
+  }, [applyPersistedDocument, loadExerciseFromUrl]);
 
   useEffect(() => {
     const handleAppExit = () => {
@@ -4635,6 +5096,138 @@ function App() {
     })
     .filter((item): item is { slotId: number; pageId: string; pageIndex: number } => item !== null);
 
+  if (isExerciseResponsesPage) {
+    return (
+      <main className="responses-page">
+        <header className="responses-topbar">
+          <div>
+            <strong>Risposte studenti</strong>
+            <span>Raggruppate per esercizio</span>
+          </div>
+          {IS_TEACHER_MODE && (
+            <div className="responses-actions">
+              <button
+                className="icon-button"
+                type="button"
+                title="Aggiorna elenco"
+                aria-label="Aggiorna elenco"
+                onClick={() => void loadExerciseCatalog()}
+                disabled={exerciseCatalogLoading}
+              >
+                <i className={`fa-solid ${exerciseCatalogLoading ? "fa-spinner fa-spin" : "fa-rotate"}`} />
+              </button>
+            </div>
+          )}
+        </header>
+        <section className="responses-scroll">
+          {!IS_TEACHER_MODE && (
+            <div className="responses-blocked">
+              <h3>Accesso riservato al docente</h3>
+              <p>Per aprire questa pagina serve la modalità docente (VITE_TEACHER_MODE=true).</p>
+            </div>
+          )}
+          {IS_TEACHER_MODE && (
+            <>
+              {exerciseCatalogLoading && <p className="exercise-responses-empty">Caricamento esercizi...</p>}
+              {!exerciseCatalogLoading && exerciseCatalog.length === 0 && (
+                <p className="exercise-responses-empty">
+                  {exerciseCatalogMessage || "Nessun esercizio presente."}
+                </p>
+              )}
+              {!exerciseCatalogLoading && exerciseCatalog.length > 0 && (
+                <div className="exercise-responses-groups">
+                  {exerciseCatalog.map((exercise) => {
+                    const responses = exerciseResponsesByExerciseId[exercise.id] ?? [];
+                    const isExpanded = expandedExerciseIds.has(exercise.id);
+                    const isLoading = Boolean(exerciseResponsesLoadingByExerciseId[exercise.id]);
+                    const message = exerciseResponsesMessageByExerciseId[exercise.id];
+                    return (
+                      <article className="exercise-responses-group" key={exercise.id}>
+                        <header className="exercise-responses-group-header">
+                          <div className="exercise-responses-group-title">
+                            <strong>{exercise.title ?? "Esercizio senza nome"}</strong>
+                            <p>ID: {exercise.id.slice(0, 8)}…</p>
+                            {exercise.createdAt && (
+                              <p>Creato il {new Date(exercise.createdAt).toLocaleString("it-IT")}</p>
+                            )}
+                            {!isLoading && responses.length > 0 && (
+                              <p>Risposte: {responses.length}</p>
+                            )}
+                          </div>
+                          <div className="exercise-responses-group-actions">
+                            <button
+                              className="icon-button"
+                              type="button"
+                              title="Apri esercizio (nuova scheda)"
+                              aria-label="Apri esercizio (nuova scheda)"
+                              onClick={() => openExerciseLink(exercise.id)}
+                            >
+                              <i className="fa-solid fa-up-right-from-square" />
+                            </button>
+                            <button
+                              className="icon-button"
+                              type="button"
+                              title="Copia link esercizio"
+                              aria-label="Copia link esercizio"
+                              onClick={() => void copyExerciseLink(exercise.id)}
+                            >
+                              <i className="fa-solid fa-link" />
+                            </button>
+                            <button
+                              className="icon-button"
+                              type="button"
+                              title={isExpanded ? "Nascondi risposte" : "Mostra risposte"}
+                              aria-label={isExpanded ? "Nascondi risposte" : "Mostra risposte"}
+                              onClick={() => toggleExerciseResponsesForExercise(exercise.id)}
+                            >
+                              <i className={`fa-solid ${isExpanded ? "fa-chevron-up" : "fa-chevron-down"}`} />
+                            </button>
+                          </div>
+                        </header>
+                        {isExpanded && (
+                          <div className="exercise-responses-group-body">
+                            {isLoading && <p className="exercise-responses-empty">Caricamento risposte...</p>}
+                            {!isLoading && responses.length === 0 && (
+                              <p className="exercise-responses-empty">
+                                {message || "Nessuna risposta ricevuta."}
+                              </p>
+                            )}
+                            {!isLoading && responses.length > 0 && (
+                              <ul className="exercise-responses-list">
+                                {responses.map((entry) => (
+                                  <li
+                                    key={entry.id}
+                                    className={entry.id === selectedExerciseResponseId ? "selected" : ""}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="exercise-responses-item"
+                                      onClick={() => {
+                                        setSelectedExerciseResponseId(entry.id);
+                                        openExerciseResponseLink(entry);
+                                      }}
+                                    >
+                                      <strong>{entry.studentName ?? "Studente senza nome"}</strong>
+                                      <span>{new Date(entry.createdAt).toLocaleString("it-IT")}</span>
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="whiteboard-app">
       <div
@@ -4958,28 +5551,68 @@ function App() {
         </span>
 
         {/* Pulsanti principali - sempre visibili */}
-        <button
-          className="icon-button"
-          title="Salva PDF"
-          aria-label="Salva PDF"
-          type="button"
-          onClick={() => void exportPdf()}
-          disabled={isPdfExporting}
-        >
-          <i className={`fa-solid ${isPdfExporting ? 'fa-spinner fa-spin' : 'fa-file-pdf'}`} />
-          <span className="sr-only">Salva PDF</span>
-        </button>
-        <button
-          className="icon-button"
-          title="Condividi PDF + XLSX"
-          aria-label="Condividi PDF + XLSX"
-          type="button"
-          onClick={() => void shareBoardAndJournal()}
-          disabled={isSharingFiles || isJournalExtracting || isPdfExporting}
-        >
-          <i className={`fa-solid ${isSharingFiles ? 'fa-spinner fa-spin' : 'fa-share-nodes'}`} />
-          <span className="sr-only">Condividi PDF + XLSX</span>
-        </button>
+        {!isExerciseLinkView && !isExerciseResponsesPage && (
+          <button
+            className="icon-button"
+            title="Salva PDF"
+            aria-label="Salva PDF"
+            type="button"
+            onClick={() => void exportPdf()}
+            disabled={isPdfExporting}
+          >
+            <i className={`fa-solid ${isPdfExporting ? 'fa-spinner fa-spin' : 'fa-file-pdf'}`} />
+            <span className="sr-only">Salva PDF</span>
+          </button>
+        )}
+        {!isExerciseLinkView && !isExerciseResponsesPage && (
+          <button
+            className="icon-button"
+            title="Condividi PDF + XLSX"
+            aria-label="Condividi PDF + XLSX"
+            type="button"
+            onClick={() => void shareBoardAndJournal()}
+            disabled={isSharingFiles || isJournalExtracting || isPdfExporting}
+          >
+            <i className={`fa-solid ${isSharingFiles ? 'fa-spinner fa-spin' : 'fa-share-nodes'}`} />
+            <span className="sr-only">Condividi PDF + XLSX</span>
+          </button>
+        )}
+        {showShareActions && (
+          <button
+            className="icon-button"
+            title="Condividi esercizio"
+            aria-label="Condividi esercizio"
+            type="button"
+            onClick={() => void createExercise()}
+          >
+            <i className="fa-solid fa-link" />
+            <span className="sr-only">Condividi esercizio</span>
+          </button>
+        )}
+        {showExerciseResponsesButton ? (
+          <button
+            className="icon-button"
+            title="Risposte studenti (nuova scheda)"
+            aria-label="Risposte studenti (nuova scheda)"
+            type="button"
+            onClick={() => openExerciseResponsesTab()}
+          >
+            <i className="fa-solid fa-user-graduate" />
+            <span className="sr-only">Risposte studenti</span>
+          </button>
+        ) : showStudentSubmitButton ? (
+          <button
+            className="icon-button"
+            title="Invia risposta"
+            aria-label="Invia risposta"
+            type="button"
+            onClick={() => void submitExerciseResponse()}
+            disabled={isExerciseResponseSaving}
+          >
+            <i className={`fa-solid ${isExerciseResponseSaving ? "fa-spinner fa-spin" : "fa-paper-plane"}`} />
+            <span className="sr-only">Invia risposta</span>
+          </button>
+        ) : null}
         <button
           className="icon-button"
           title="Cancella oggetti selezionati"
@@ -5394,3 +6027,4 @@ function App() {
 }
 
 export default App;
+

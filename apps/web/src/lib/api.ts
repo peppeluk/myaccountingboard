@@ -17,6 +17,20 @@ export type JournalEntryPayload = {
 };
 
 export type JournalTemplateKey = "t-smart" | "t-smart-office";
+export type ExerciseResponseRow = {
+  id: string;
+  exercise_id: string;
+  student_name: string | null;
+  board_json: unknown;
+  journal_entries: unknown;
+  created_at: string;
+};
+
+export type ExerciseRow = {
+  id: string;
+  title: string | null;
+  created_at: string | null;
+};
 
 const DEFAULT_API_BASE_URL =
   typeof window !== "undefined"
@@ -71,4 +85,22 @@ export async function exportJournalWorkbook(
   }
 
   return response.blob();
+}
+
+export async function fetchExerciseResponses(
+  exerciseId: string,
+  teacherToken?: string
+): Promise<ExerciseResponseRow[]> {
+  return request<ExerciseResponseRow[]>(
+    `/api/exercise-responses?exerciseId=${encodeURIComponent(exerciseId)}`,
+    {
+      headers: teacherToken ? { "x-teacher-token": teacherToken } : undefined
+    }
+  );
+}
+
+export async function fetchExercises(teacherToken?: string): Promise<ExerciseRow[]> {
+  return request<ExerciseRow[]>("/api/exercises", {
+    headers: teacherToken ? { "x-teacher-token": teacherToken } : undefined
+  });
 }

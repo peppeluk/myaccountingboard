@@ -7,6 +7,8 @@ import { readConfig } from "./config.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerCacheRoutes } from "./routes/cache.js";
 import { registerJournalRoutes } from "./routes/journal.js";
+import { registerExerciseResponseRoutes } from "./routes/exerciseResponses.js";
+import { registerExerciseRoutes } from "./routes/exercises.js";
 
 export async function buildServer() {
   const config = readConfig();
@@ -28,6 +30,8 @@ export async function buildServer() {
   registerHealthRoutes(app, { cache, startedAt });
   registerCacheRoutes(app, cache);
   registerJournalRoutes(app, config);
+  registerExerciseRoutes(app, config);
+  registerExerciseResponseRoutes(app, config);
 
   app.addHook("onClose", async () => {
     await cache.close();
