@@ -747,7 +747,6 @@ export function JournalPanel({
                     }}
                     onClick={useTapForMobileInputs ? handleAmountClick : handleAmountSingleClick}
                     onDoubleClick={useTapForMobileInputs ? undefined : handleAmountClick}
-                    placeholder="0,00"
                     title={useTapForMobileInputs ? "Tocca per inserire nella calcolatrice" : "Doppio click per inserire nella calcolatrice"}
                     style={{ cursor: 'pointer' }}
                   />
@@ -767,7 +766,6 @@ export function JournalPanel({
                     }}
                     onClick={useTapForMobileInputs ? handleAmountClick : handleAmountSingleClick}
                     onDoubleClick={useTapForMobileInputs ? undefined : handleAmountClick}
-                    placeholder="0,00"
                     title={useTapForMobileInputs ? "Tocca per inserire nella calcolatrice" : "Doppio click per inserire nella calcolatrice"}
                     style={{ cursor: 'pointer' }}
                   />
