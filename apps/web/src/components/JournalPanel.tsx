@@ -119,6 +119,19 @@ function formatAmountForDisplay(rawValue: string): string {
   return amountFormatter.format(parsed);
 }
 
+function formatCalculatorResult(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const normalized = trimmed.replace(/\s/g, "").replace(",", ".");
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return formatAmountForDisplay(rawValue);
+  }
+  return amountFormatter.format(parsed);
+}
+
 function isCoarsePointerDevice(): boolean {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
     return false;
@@ -126,7 +139,14 @@ function isCoarsePointerDevice(): boolean {
   return window.matchMedia("(pointer: coarse)").matches;
 }
 
-function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboard, disableSystemKeyboard }: AccountPickerProps) {
+function AccountPicker({
+  inputId,
+  entry,
+  accounts,
+  onUpdate,
+  onOpenVirtualKeyboard,
+  disableSystemKeyboard
+}: AccountPickerProps) {
   const [query, setQuery] = useState(entry.accountName);
   const [isOpen, setIsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -286,7 +306,11 @@ function AccountPicker({ inputId, entry, accounts, onUpdate, onOpenVirtualKeyboa
           delete (target as any)._handleInputChange;
         }}
         placeholder="Cerca conto..."
-        title={useTapForVirtualKeyboard ? "Tocca per aprire la tastiera virtuale" : "Doppio click per aprire la tastiera virtuale"}
+        title={
+          useTapForVirtualKeyboard
+            ? "Tocca per aprire la tastiera virtuale"
+            : "Doppio click per aprire la tastiera virtuale"
+        }
         style={{ cursor: 'pointer' }}
       />
       {isOpen && (
@@ -381,6 +405,9 @@ export function JournalPanel({
         document.querySelectorAll('.calculator-selected-field').forEach(el => {
           el.classList.remove('calculator-selected-field');
         });
+        
+        // Resetta il campo di destinazione quando si chiude la calcolatrice
+        setDestinationField({ entryId: null, field: null });
       }
     };
 
@@ -388,7 +415,11 @@ export function JournalPanel({
     const interval = setInterval(checkCalculatorState, 100);
     
     // Event listener per intercettare la cancellazione della calcolatrice
-    const handleCalculatorClear = () => {
+    const handleCalculatorClear = (event: Event) => {
+      const detail = (event as CustomEvent | undefined)?.detail as { mode?: string } | undefined;
+      if (detail?.mode === "field") {
+        return;
+      }
       // Quando la calcolatrice viene cancellata, chiudila e riaprila per mantenere il campo evidenziato
       setTimeout(() => {
         const calculator = document.querySelector('.calculator');
@@ -541,12 +572,14 @@ export function JournalPanel({
         
         if (entryId && field && onUpdateEntry) {
           // Applica la formattazione per il display prima di inserire il valore
-          const formattedValue = formatAmountForDisplay(value);
+          const formattedValue = formatCalculatorResult(value);
           console.log('🧮 Calculator result formatting:', { original: value, formatted: formattedValue });
+          
+          // Forza l'aggiornamento anche se il valore è identico
           onUpdateEntry(entryId, { [field]: formattedValue });
           
-          // Resetta il campo di destinazione dopo l'inserimento
-          setDestinationField({ entryId: null, field: null });
+          // NON resettare il campo di destinazione dopo l'inserimento per permettere ricalcoli multipli
+          // setDestinationField({ entryId: null, field: null });
         }
       } else {
         // Per i valori copiati, non fare nulla (gestito dai click sui campi)
@@ -606,16 +639,28 @@ export function JournalPanel({
                   <input
                     type="text"
                     value={entry.date ? new Date(entry.date).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : ''}
+                    inputMode={disableSystemKeyboard ? "none" : "text"}
+                    readOnly={disableSystemKeyboard}
                     onChange={(event) => {
                       const value = event.target.value;
-                      if (value.length === 5 && value.includes('/')) {
-                        const [day, month] = value.split('/');
-                        const year = new Date().getFullYear();
-                        const isoDate = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-                        onUpdateEntry(entry.id, { date: isoDate });
-                      } else if (value === '') {
+                      if (!value) {
                         onUpdateEntry(entry.id, { date: '' });
+                        return;
                       }
+                      const match = value.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+                      if (!match) {
+                        return;
+                      }
+                      const day = match[1].padStart(2, '0');
+                      const month = match[2].padStart(2, '0');
+                      const yearRaw = match[3];
+                      const year = yearRaw
+                        ? yearRaw.length === 2
+                          ? `20${yearRaw}`
+                          : yearRaw
+                        : String(new Date().getFullYear());
+                      const isoDate = `${year}-${month}-${day}`;
+                      onUpdateEntry(entry.id, { date: isoDate });
                     }}
                     onBlur={() => {
                       // Forza il re-render per assicurare che il valore sia sincronizzato
@@ -624,7 +669,7 @@ export function JournalPanel({
                       }
                     }}
                     placeholder="gg/mm"
-                    maxLength={5}
+                    maxLength={10}
                     style={{ paddingRight: '30px' }}
                   />
                   <input
@@ -695,8 +740,9 @@ export function JournalPanel({
                     inputMode={disableSystemKeyboard ? "none" : "text"}
                     readOnly={disableSystemKeyboard}
                     onChange={(event) => {
-                      console.log('📝 Description onChange called with:', event.target.value);
-                      onUpdateEntry(entry.id, { description: event.target.value });
+                      const nextValue = event.target.value;
+                      console.log('📝 Description onChange called with:', nextValue);
+                      onUpdateEntry(entry.id, { description: nextValue });
                     }}
                     onDoubleClick={(event) => {
                       if (useTapForMobileInputs) {
@@ -740,7 +786,8 @@ export function JournalPanel({
                     data-entry-id={entry.id}
                     data-field="debit"
                     onChange={(event) => {
-                      onUpdateEntry(entry.id, { debit: sanitizeAmountTyping(event.target.value) });
+                      const nextValue = event.target.value;
+                      onUpdateEntry(entry.id, { debit: sanitizeAmountTyping(nextValue) });
                     }}
                     onBlur={() => {
                       onUpdateEntry(entry.id, { debit: formatAmountForDisplay(entry.debit) });
@@ -759,7 +806,8 @@ export function JournalPanel({
                     data-entry-id={entry.id}
                     data-field="credit"
                     onChange={(event) => {
-                      onUpdateEntry(entry.id, { credit: sanitizeAmountTyping(event.target.value) });
+                      const nextValue = event.target.value;
+                      onUpdateEntry(entry.id, { credit: sanitizeAmountTyping(nextValue) });
                     }}
                     onBlur={() => {
                       onUpdateEntry(entry.id, { credit: formatAmountForDisplay(entry.credit) });

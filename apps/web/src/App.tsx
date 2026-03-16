@@ -33,6 +33,10 @@ type BackgroundMode = "plain" | "grid";
 
 const IS_TEACHER_MODE = import.meta.env.VITE_TEACHER_MODE === "true";
 const TEACHER_TOKEN = import.meta.env.VITE_TEACHER_TOKEN;
+const TEACHER_EMAILS = (import.meta.env.VITE_TEACHER_EMAILS ?? "")
+  .split(",")
+  .map((value: string) => value.trim().toLowerCase())
+  .filter(Boolean);
 
 type Page = {
   id: string;
@@ -56,6 +60,13 @@ type ExerciseResponseEntry = {
   createdAt: string;
   journalEntries: JournalEntry[];
   boardJson: unknown;
+};
+
+type AuthUser = {
+  id: string;
+  email: string | null;
+  name: string;
+  avatarUrl: string | null;
 };
 
 type ToolHandlers = {
@@ -302,6 +313,27 @@ function getExerciseViewFlags() {
   };
 }
 
+function mapSupabaseUser(
+  user: { id: string; email?: string | null; user_metadata?: Record<string, unknown> } | null
+): AuthUser | null {
+  if (!user) {
+    return null;
+  }
+  const metadata = user.user_metadata ?? {};
+  const displayName =
+    (typeof metadata.full_name === "string" && metadata.full_name.trim()) ||
+    (typeof metadata.name === "string" && metadata.name.trim()) ||
+    user.email ||
+    "Docente";
+  const avatarUrl = typeof metadata.avatar_url === "string" ? metadata.avatar_url : null;
+  return {
+    id: user.id,
+    email: user.email ?? null,
+    name: displayName,
+    avatarUrl
+  };
+}
+
 function App() {
   const initialDocumentRef = useRef<PersistedDocument>(loadInitialDocument());
   const initialPageCanvasDataRef = useRef<PageCanvasDataMap>(
@@ -361,6 +393,9 @@ function App() {
     initialExerciseView.isExerciseResponsesPage
   );
   const [isExerciseResponseSaving, setIsExerciseResponseSaving] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
     () => initialDocumentRef.current.journalEntries
   );
@@ -381,6 +416,45 @@ function App() {
   const [slotAssignments, setSlotAssignments] = useState<Array<string | null>>(
     () => Array.from({ length: 6 }, () => null) // CANVAS_POOL_SIZE
   );
+
+  const authEmail = authUser?.email?.toLowerCase() ?? "";
+  const isTeacherByEmail =
+    Boolean(authEmail) && (TEACHER_EMAILS.length === 0 || TEACHER_EMAILS.includes(authEmail));
+  const hasTeacherAccess = IS_TEACHER_MODE || isTeacherByEmail;
+
+  useEffect(() => {
+    if (!supabase) {
+      setIsAuthReady(true);
+      return;
+    }
+
+    let active = true;
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!active) {
+          return;
+        }
+        setAuthUser(mapSupabaseUser(data.session?.user ?? null));
+        setIsAuthReady(true);
+      })
+      .catch((error) => {
+        console.error("Errore lettura sessione Supabase:", error);
+        if (active) {
+          setIsAuthReady(true);
+        }
+      });
+
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthUser(mapSupabaseUser(session?.user ?? null));
+      setIsAuthReady(true);
+    });
+
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+    };
+  }, [hasTeacherAccess]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const boardPagesRef = useRef<HTMLDivElement | null>(null);
@@ -1574,8 +1648,13 @@ function App() {
   );
 
   const loadExerciseCatalog = useCallback(async () => {
-    if (!IS_TEACHER_MODE) {
-      setExerciseCatalogMessage("Risposte disponibili solo in modalità docente.");
+    if (!hasTeacherAccess) {
+      setExerciseCatalogMessage("Risposte disponibili solo in modalita docente.");
+      setExerciseCatalog([]);
+      return;
+    }
+    if (!TEACHER_TOKEN) {
+      setExerciseCatalogMessage("Token docente non configurato.");
       setExerciseCatalog([]);
       return;
     }
@@ -1599,13 +1678,24 @@ function App() {
     } finally {
       setExerciseCatalogLoading(false);
     }
-  }, []);
+  }, [hasTeacherAccess]);
 
   const loadExerciseResponsesForExercise = useCallback(async (exerciseId: string) => {
-    if (!IS_TEACHER_MODE) {
+    if (!hasTeacherAccess) {
       setExerciseResponsesMessageByExerciseId((current) => ({
         ...current,
-        [exerciseId]: "Risposte disponibili solo in modalità docente."
+        [exerciseId]: "Risposte disponibili solo in modalita docente."
+      }));
+      setExerciseResponsesByExerciseId((current) => ({
+        ...current,
+        [exerciseId]: []
+      }));
+      return;
+    }
+    if (!TEACHER_TOKEN) {
+      setExerciseResponsesMessageByExerciseId((current) => ({
+        ...current,
+        [exerciseId]: "Token docente non configurato."
       }));
       setExerciseResponsesByExerciseId((current) => ({
         ...current,
@@ -1665,7 +1755,7 @@ function App() {
         [exerciseId]: false
       }));
     }
-  }, []);
+  }, [hasTeacherAccess]);
 
   const toggleExerciseResponsesForExercise = useCallback(
     (exerciseId: string) => {
@@ -1709,11 +1799,11 @@ function App() {
     if (!isExerciseResponsesPage) {
       return;
     }
-    if (!IS_TEACHER_MODE) {
+    if (!hasTeacherAccess) {
       return;
     }
     void loadExerciseCatalog();
-  }, [isExerciseResponsesPage, loadExerciseCatalog]);
+  }, [hasTeacherAccess, isExerciseResponsesPage, loadExerciseCatalog]);
 
   const openExerciseResponseLink = useCallback((response: ExerciseResponseEntry) => {
     const linkPath = `/exercise/${encodeURIComponent(response.exerciseId)}`;
@@ -2567,10 +2657,10 @@ function App() {
     () => getJournalProfileOption(selectedJournalProfileId),
     [selectedJournalProfileId]
   );
-  const showTeacherExerciseMenu = IS_TEACHER_MODE && !isExerciseLinkView && !isExerciseResponsesPage;
+  const showTeacherExerciseMenu = hasTeacherAccess && !isExerciseLinkView && !isExerciseResponsesPage;
   const showShareActions = showTeacherExerciseMenu;
   const showExerciseResponsesButton = showTeacherExerciseMenu;
-  const showStudentSubmitButton = Boolean(sharedExerciseId) && (isExerciseLinkView || !IS_TEACHER_MODE);
+  const showStudentSubmitButton = Boolean(sharedExerciseId) && (isExerciseLinkView || !hasTeacherAccess);
 
   const buildJournalExportPayload = useCallback(
     () =>
@@ -2937,6 +3027,46 @@ function App() {
     }
   }, [buildJournalWorkbookBlob, downloadBlob]);
 
+  const signInTeacher = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      window.alert("Configura VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY");
+      return;
+    }
+    try {
+      setIsAuthBusy(true);
+      const redirectTo = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo }
+      });
+      if (error) {
+        throw error;
+      }
+    } catch (error) {
+      console.error("Errore login Google:", error);
+      window.alert("Accesso con Google non riuscito");
+      setIsAuthBusy(false);
+    }
+  }, []);
+
+  const signOutTeacher = useCallback(async () => {
+    if (!supabase) {
+      return;
+    }
+    try {
+      setIsAuthBusy(true);
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        throw error;
+      }
+    } catch (error) {
+      console.error("Errore logout Google:", error);
+      window.alert("Logout non riuscito");
+    } finally {
+      setIsAuthBusy(false);
+    }
+  }, []);
+
   const createExercise = useCallback(async () => {
     try {
       if (!isSupabaseConfigured || !supabase) {
@@ -3119,7 +3249,11 @@ function App() {
       };
 
       const responseId = new URLSearchParams(window.location.search).get("responseId")?.trim();
-      if (responseId && IS_TEACHER_MODE) {
+      if (responseId && hasTeacherAccess) {
+        if (!TEACHER_TOKEN) {
+          setOcrStatus("Token docente non configurato");
+          return true;
+        }
         try {
           const responses = await fetchExerciseResponses(exerciseId, TEACHER_TOKEN);
           const match = (responses ?? []).find((entry) => entry.id === responseId);
@@ -3348,6 +3482,55 @@ function App() {
 
   const handleCalculatorBackspace = useCallback(() => {
     setDisplay((previous) => {
+      // Se abbiamo un risultato (contiene =), permetti la modifica della formula originale
+      if (previous.includes("=")) {
+        const input = calculatorInputRef.current;
+        const fallbackStart = Math.min(calculatorSelectionRef.current.start, previous.length);
+        const fallbackEnd = Math.min(calculatorSelectionRef.current.end, previous.length);
+        const start = input?.selectionStart ?? fallbackStart;
+        const end = input?.selectionEnd ?? fallbackEnd;
+        
+        // Se il cursore è nella parte della formula (prima del =), modifica la formula
+        if (start < previous.indexOf("=")) {
+          const formula = previous.split("=")[0];
+          const result = previous.split("=")[1]?.trim();
+          
+          // Calcola la posizione del cursore nella formula
+          const formulaStart = start;
+          const formulaEnd = Math.min(end, formula.length);
+          
+          // Se c'è una selezione nella formula, cancella la selezione
+          if (formulaStart !== formulaEnd) {
+            const newFormula = `${formula.slice(0, formulaStart)}${formula.slice(formulaEnd)}`;
+            const nextValue = `${newFormula}=${result}`;
+            setCalculatorCaretPosition(formulaStart);
+            return nextValue;
+          }
+          
+          // Se siamo all'inizio della formula, non fare nulla
+          if (formulaStart <= 0) {
+            return previous;
+          }
+          
+          // Cancella un carattere nella formula
+          const newFormula = `${formula.slice(0, formulaStart - 1)}${formula.slice(formulaStart)}`;
+          const nextValue = `${newFormula}=${result}`;
+          setCalculatorCaretPosition(formulaStart - 1);
+          return nextValue;
+        }
+        
+        // Se il cursore è dopo il =, cancella il risultato
+        const result = previous.split("=")[1]?.trim();
+        if (result.length > 1) {
+          const nextValue = result.slice(0, -1);
+          setCalculatorCaretPosition(nextValue.length);
+          return nextValue;
+        } else {
+          setCalculatorCaretPosition(0);
+          return "";
+        }
+      }
+
       const input = calculatorInputRef.current;
       const fallbackStart = Math.min(calculatorSelectionRef.current.start, previous.length);
       const fallbackEnd = Math.min(calculatorSelectionRef.current.end, previous.length);
@@ -5104,7 +5287,7 @@ function App() {
             <strong>Risposte studenti</strong>
             <span>Raggruppate per esercizio</span>
           </div>
-          {IS_TEACHER_MODE && (
+          {hasTeacherAccess && (
             <div className="responses-actions">
               <button
                 className="icon-button"
@@ -5120,13 +5303,31 @@ function App() {
           )}
         </header>
         <section className="responses-scroll">
-          {!IS_TEACHER_MODE && (
+          {!hasTeacherAccess && (
             <div className="responses-blocked">
               <h3>Accesso riservato al docente</h3>
-              <p>Per aprire questa pagina serve la modalità docente (VITE_TEACHER_MODE=true).</p>
+              {!isSupabaseConfigured && (
+                <p>Configura Supabase per abilitare l'accesso con Google.</p>
+              )}
+              {isSupabaseConfigured && !authUser && (
+                <>
+                  <p>Accedi con Google per aprire le risposte.</p>
+                  <button type="button" onClick={() => void signInTeacher()} disabled={isAuthBusy}>
+                    Accedi con Google
+                  </button>
+                </>
+              )}
+              {isSupabaseConfigured && authUser && !isTeacherByEmail && (
+                <>
+                  <p>Account non autorizzato: {authUser.email ?? "email non disponibile"}.</p>
+                  <button type="button" onClick={() => void signOutTeacher()} disabled={isAuthBusy}>
+                    Esci
+                  </button>
+                </>
+              )}
             </div>
           )}
-          {IS_TEACHER_MODE && (
+          {hasTeacherAccess && (
             <>
               {exerciseCatalogLoading && <p className="exercise-responses-empty">Caricamento esercizi...</p>}
               {!exerciseCatalogLoading && exerciseCatalog.length === 0 && (
@@ -5550,6 +5751,40 @@ function App() {
         | di {pages.length} | {ocrStatus}
         </span>
 
+        {isSupabaseConfigured && (
+          <div className="teacher-auth">
+            {!isAuthReady && <span className="teacher-auth-status">Accesso...</span>}
+            {isAuthReady && authUser && (
+              <>
+                <span className={`teacher-auth-label ${isTeacherByEmail ? "ok" : "blocked"}`}>
+                  {isTeacherByEmail ? "Docente" : "Account"}: {authUser.name}
+                </span>
+                <button
+                  className="icon-button"
+                  type="button"
+                  title="Esci"
+                  aria-label="Esci"
+                  onClick={() => void signOutTeacher()}
+                  disabled={isAuthBusy}
+                >
+                  <i className="fa-solid fa-right-from-bracket" />
+                  <span className="sr-only">Esci</span>
+                </button>
+              </>
+            )}
+            {isAuthReady && !authUser && (
+              <button
+                type="button"
+                className="teacher-auth-button"
+                onClick={() => void signInTeacher()}
+                disabled={isAuthBusy}
+              >
+                Accedi docente
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Pulsanti principali - sempre visibili */}
         {!isExerciseLinkView && !isExerciseResponsesPage && (
           <button
@@ -5911,29 +6146,67 @@ function App() {
               <span className="sr-only">Chiudi</span>
             </button>
           </header>
-          <input
-            ref={calculatorInputRef}
-            value={display}
-            onChange={(event) => setDisplay(event.target.value)}
-            onClick={syncCalculatorSelection}
-            onSelect={syncCalculatorSelection}
-            onKeyUp={syncCalculatorSelection}
-            onMouseUp={syncCalculatorSelection}
-            onFocus={syncCalculatorSelection}
-            onBlur={syncCalculatorSelection}
-            placeholder="Espressione"
-            readOnly
-          />
+          <div className="calculator-expression-container">
+            <input
+              ref={calculatorInputRef}
+              value={display}
+              onChange={(event) => setDisplay(event.target.value)}
+              onClick={syncCalculatorSelection}
+              onSelect={syncCalculatorSelection}
+              onKeyUp={syncCalculatorSelection}
+              onMouseUp={syncCalculatorSelection}
+              onFocus={syncCalculatorSelection}
+              onBlur={syncCalculatorSelection}
+              placeholder="Espressione"
+              readOnly
+            />
+            {display.includes("=") && (
+              <div className="calculator-result">
+                {display.split("=")[1]?.trim()}
+              </div>
+            )}
+          </div>
           <div className="calculator-grid">
-            {["7", "8", "9", "/", "\u232B", "4", "5", "6", "*", "C", "1", "2", "3", "-", "(", "0", ".", "+", ")"].map(
-              (item) => (
+            {[
+              "7",
+              "8",
+              "9",
+              "/",
+              "\u232B",
+              "4",
+              "5",
+              "6",
+              "*",
+              "C",
+              "1",
+              "2",
+              "3",
+              "-",
+              "(",
+              "0",
+              ".",
+              "+",
+              ")",
+              "CF"
+            ].map((item) => {
+              const isClearField = item === "CF";
+              return (
                 <button
                   key={item}
                   type="button"
+                  title={isClearField ? "Svuota campo selezionato" : item === "C" ? "Svuota calcolatrice" : undefined}
+                  aria-label={isClearField ? "Svuota campo selezionato" : undefined}
                   onClick={() => {
                     if (item === "C") {
                       setDisplay("");
                       setCalculatorCaretPosition(0);
+                      return;
+                    }
+                    if (isClearField) {
+                      const event = new CustomEvent("calculator-clear-field", {
+                        detail: { mode: "field" }
+                      });
+                      window.dispatchEvent(event);
                       return;
                     }
                     if (item === "\u232B") {
@@ -5941,16 +6214,78 @@ function App() {
                       return;
                     }
                     setDisplay((previous) => {
-                      const nextValue = `${previous}${item}`;
-                      setCalculatorCaretPosition(nextValue.length);
+                      // Se abbiamo un risultato (contiene =), gestisci l'inserimento in base alla posizione del cursore
+                      if (previous.includes("=")) {
+                        const input = calculatorInputRef.current;
+                        const fallbackStart = Math.min(calculatorSelectionRef.current.start, previous.length);
+                        const fallbackEnd = Math.min(calculatorSelectionRef.current.end, previous.length);
+                        const start = input?.selectionStart ?? fallbackStart;
+                        const end = input?.selectionEnd ?? fallbackEnd;
+                        const equalsIndex = previous.indexOf("=");
+                        
+                        // Se il cursore è nella parte della formula (prima del =), modifica la formula
+                        if (start < equalsIndex) {
+                          const formula = previous.split("=")[0];
+                          const result = previous.split("=")[1]?.trim();
+                          
+                          // Calcola la posizione del cursore nella formula
+                          const formulaStart = start;
+                          const formulaEnd = Math.min(end, formula.length);
+                          
+                          // Se c'è una selezione nella formula, sostituisci la selezione
+                          if (formulaStart !== formulaEnd) {
+                            const newFormula = `${formula.slice(0, formulaStart)}${item}${formula.slice(formulaEnd)}`;
+                            const nextValue = `${newFormula}=${result}`;
+                            setCalculatorCaretPosition(formulaStart + item.length);
+                            return nextValue;
+                          }
+                          
+                          // Altrimenti inserisci alla posizione del cursore nella formula
+                          const newFormula = `${formula.slice(0, formulaStart)}${item}${formula.slice(formulaStart)}`;
+                          const nextValue = `${newFormula}=${result}`;
+                          setCalculatorCaretPosition(formulaStart + item.length);
+                          return nextValue;
+                        }
+                        
+                        // Se il cursore è dopo il =, gestisci come continuazione dell'operazione
+                        const result = previous.split("=")[1]?.trim();
+                        // Se è un operatore, inizia con risultato + operatore
+                        if (["+", "-", "*", "/"].includes(item)) {
+                          const nextValue = `${result}${item}`;
+                          setCalculatorCaretPosition(nextValue.length);
+                          return nextValue;
+                        }
+                        // Se è un numero o altro, inizia solo con il numero
+                        const nextValue = `${item}`;
+                        setCalculatorCaretPosition(nextValue.length);
+                        return nextValue;
+                      }
+                      
+                      // Per modifiche normali, inserisci alla posizione del cursore
+                      const input = calculatorInputRef.current;
+                      const fallbackStart = Math.min(calculatorSelectionRef.current.start, previous.length);
+                      const fallbackEnd = Math.min(calculatorSelectionRef.current.end, previous.length);
+                      const start = input?.selectionStart ?? fallbackStart;
+                      const end = input?.selectionEnd ?? fallbackEnd;
+                      
+                      // Se c'è una selezione, sostituisci la selezione
+                      if (start !== end) {
+                        const nextValue = `${previous.slice(0, start)}${item}${previous.slice(end)}`;
+                        setCalculatorCaretPosition(start + item.length);
+                        return nextValue;
+                      }
+                      
+                      // Altrimenti inserisci alla posizione del cursore
+                      const nextValue = `${previous.slice(0, start)}${item}${previous.slice(start)}`;
+                      setCalculatorCaretPosition(start + item.length);
                       return nextValue;
                     });
                   }}
                 >
                   {item}
                 </button>
-              )
-            )}
+              );
+            })}
           </div>
           <button className="equals" type="button" onClick={calculate}>
             =
