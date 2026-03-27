@@ -1,0 +1,28 @@
+{
+  "name": "myaccounting-sync-server",
+  "version": "1.0.0",
+  "description": "WebSocket server per sincronizzazione lavagna in tempo reale (LAN)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test-server.js"
+  },
+  "keywords": [
+    "websocket",
+    "sync",
+    "realtime",
+    "canvas"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.16.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

@@ -7,6 +7,379 @@
   box-sizing: border-box;
 }
 
+/* ============================================================
+   SYNC MULTI-ROOM - STYLES
+   ============================================================ */
+
+/* Sync Dot nel bottone */
+.sync-dot {
+  width: 8px;
+  height: 8px;
+  background: #10b981;
+  border-radius: 50%;
+  margin-left: 6px;
+  animation: sync-pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes sync-pulse-dot {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.2);
+  }
+}
+
+/* Modal Sync */
+.sync-modal {
+  max-width: 500px;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1000;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+/* Overlay che non sposta la toolbar */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+}
+
+/* Modal content generico */
+.modal-content {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  max-height: 90vh;
+  overflow-y: auto;
+  width: 90%;
+  max-width: 500px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #111827;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-body {
+  padding: 20px;
+}
+
+/* Status Connesso */
+.sync-status-connected {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sync-status-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: white;
+  border-radius: 8px;
+}
+
+.sync-status-header i {
+  font-size: 24px;
+}
+
+.sync-status-header strong {
+  display: block;
+  font-size: 13px;
+  opacity: 0.9;
+  margin-bottom: 4px;
+}
+
+.sync-room-name {
+  display: block;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.sync-status-metric {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: #f1f5f9;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.sync-status-metric i {
+  color: #64748b;
+}
+
+/* Lista Utenti */
+.sync-connected-users {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.sync-connected-users h4 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+}
+
+.sync-connected-users ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sync-connected-users li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.sync-connected-users li i {
+  color: #3b82f6;
+  font-size: 16px;
+}
+
+.sync-user-name {
+  flex: 1;
+  font-weight: 500;
+  color: #334155;
+}
+
+.sync-connected-users small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+/* Form Join */
+.sync-join-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Divider */
+.sync-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  margin: 20px 0;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.sync-divider::before,
+.sync-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.sync-divider span {
+  padding: 0 12px;
+}
+
+/* Quick Rooms */
+.sync-quick-rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sync-quick-rooms-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.sync-quick-room-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 12px;
+  background: white;
+  border: 2px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.sync-quick-room-btn:hover {
+  background: #f8fafc;
+  border-color: #3b82f6;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
+}
+
+.sync-room-icon {
+  font-size: 28px;
+}
+
+.sync-room-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+/* Info Box */
+.sync-info-box {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.sync-info-box i {
+  color: #0284c7;
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.sync-info-box strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #334155;
+}
+
+.sync-info-box ul {
+  margin: 4px 0 0 0;
+  padding-left: 20px;
+}
+
+.sync-info-box li {
+  margin: 4px 0;
+  color: #475569;
+  line-height: 1.5;
+}
+
+/* Mini Indicator */
+.sync-mini-indicator {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: white;
+  padding: 10px 16px;
+  border-radius: 24px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 1000;
+  border: 1px solid #e2e8f0;
+}
+
+.sync-status-dot {
+  width: 8px;
+  height: 8px;
+  background: #10b981;
+  border-radius: 50%;
+}
+
+.sync-status-dot.pulsing {
+  animation: sync-pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes sync-pulse-glow {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+  }
+}
+
+.sync-room-text {
+  color: #334155;
+  font-weight: 600;
+}
+
+.sync-users-count {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #eff6ff;
+  border-radius: 12px;
+  color: #3b82f6;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sync-users-count i {
+  font-size: 11px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .sync-modal {
+    max-width: 95%;
+    margin: 20px auto;
+  }
+
+  .sync-quick-rooms-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sync-mini-indicator {
+    bottom: 10px;
+    right: 10px;
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+}
+
 html,
 body,
 #root {
@@ -1727,7 +2100,8 @@ input[inputmode="none"]:focus {
   background-color: #f3f8ff !important;
 }
 
-.calculator-selected-field {
+.calculator-selected-field,
+.journal-selected-field {
   outline: 2px solid #007bff !important;
   outline-offset: 2px !important;
   background-color: #f3f8ff !important;

@@ -1,0 +1,142 @@
+﻿/* MyScript ink UI styles. Extracted for future re-apply. */
+.ink-input {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.ink-input input {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+}
+
+.ink-input .ink-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  touch-action: none;
+  background: transparent;
+  overflow: hidden;
+}
+
+.ink-input.ink-enabled .ink-overlay {
+  pointer-events: auto;
+}
+
+.ink-input.ink-enabled input {
+  caret-color: transparent;
+}
+
+.ink-input .ink-overlay canvas,
+.ink-input .ink-overlay svg {
+  width: 100%;
+  height: 100%;
+}
+
+.ink-input .ms-menu {
+  display: none !important;
+}
+
+.myscript-test-panel {
+  position: sticky;
+  top: 12px;
+  margin: 12px 12px 0 auto;
+  width: min(460px, 92vw);
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 10px 12px 12px;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+  z-index: 15;
+  pointer-events: auto;
+}
+
+.myscript-test-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.myscript-test-header strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.myscript-test-header span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.myscript-test-input {
+  height: 168px;
+}
+
+.myscript-test-input .ink-input {
+  height: 100%;
+}
+
+.myscript-test-input input {
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  border: 1px solid #cbd5f5;
+  padding: 12px 12px;
+  font-size: 18px;
+  line-height: 1.2;
+  background: #f8fafc;
+}
+
+.account-ink-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  width: min(360px, 70vw);
+  border: 1px solid #d1dae5;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.2);
+  padding: 8px 10px 10px;
+  z-index: 200;
+}
+
+.account-ink-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.account-ink-header strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.account-ink-input {
+  height: 160px;
+}
+
+.account-ink-input .ink-input {
+  height: 100%;
+}
+
+.account-ink-input input {
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  border: 1px solid #cbd5f5;
+  padding: 10px;
+  font-size: 16px;
+  line-height: 1.2;
+  background: #f8fafc;
+}
+
+.account-ink-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #64748b;
+}

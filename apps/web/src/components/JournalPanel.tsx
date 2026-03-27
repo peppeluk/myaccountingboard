@@ -13,6 +13,8 @@ export type JournalEntry = {
   closeLine: boolean;
 };
 
+type JournalFieldKey = "date" | "account" | "description" | "debit" | "credit";
+
 type JournalPanelProps = {
   isOpen: boolean;
   entries: JournalEntry[];
@@ -29,15 +31,24 @@ type JournalPanelProps = {
   onRemoveEntry: (entryId: string) => void;
   onUpdateEntry: (entryId: string, patch: Partial<JournalEntry>) => void;
   onOpenVirtualKeyboard?: (element: HTMLInputElement, field: string) => void;
+  onSelectField?: (entryId: string, field: JournalFieldKey) => void;
+  selectedField?: { entryId: string; field: JournalFieldKey } | null;
+  onCalculatorTargetChange?: (target: { entryId: string; field: "debit" | "credit" } | null) => void;
+  calculatorTarget?: { entryId: string; field: "debit" | "credit" } | null;
+  onScroll?: (top: number, left: number) => void;
+  scrollPosition?: { top: number; left: number } | null;
   disableSystemKeyboard?: boolean;
 };
 
 type AccountPickerProps = {
   inputId: string;
+  entryId: string;
   entry: JournalEntry;
   accounts: readonly AccountOption[];
   onUpdate: (patch: Pick<JournalEntry, "accountCode" | "accountName">) => void;
   onOpenVirtualKeyboard?: (element: HTMLInputElement, field: string) => void;
+  onSelectField?: (entryId: string, field: JournalFieldKey) => void;
+  isSelected?: boolean;
   disableSystemKeyboard?: boolean;
 };
 
@@ -141,16 +152,20 @@ function isCoarsePointerDevice(): boolean {
 
 function AccountPicker({
   inputId,
+  entryId,
   entry,
   accounts,
   onUpdate,
   onOpenVirtualKeyboard,
+  onSelectField,
+  isSelected,
   disableSystemKeyboard
 }: AccountPickerProps) {
   const [query, setQuery] = useState(entry.accountName);
   const [isOpen, setIsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const useTapForVirtualKeyboard = Boolean(disableSystemKeyboard && onOpenVirtualKeyboard && isCoarsePointerDevice());
+  const lastCloseLineRef = useRef(entry.closeLine);
   
   // Ref per memorizzare la funzione handleInputChange in modo che possa essere chiamata esternamente
   const handleInputChangeRef = useRef<(value: string) => void>();
@@ -192,6 +207,27 @@ function AccountPicker({
       window.removeEventListener("pointerdown", onGlobalPointerDown);
     };
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isSelected && isOpen) {
+      setIsOpen(false);
+    }
+  }, [isOpen, isSelected]);
+
+  useEffect(() => {
+    if (isOpen && entry.accountCode && entry.accountName) {
+      setIsOpen(false);
+    }
+  }, [entry.accountCode, entry.accountName, isOpen]);
+
+  useEffect(() => {
+    if (lastCloseLineRef.current !== entry.closeLine) {
+      lastCloseLineRef.current = entry.closeLine;
+      if (isOpen) {
+        setIsOpen(false);
+      }
+    }
+  }, [entry.closeLine, isOpen]);
 
   const filteredAccounts = useMemo(() => {
     const search = normalizeForSearch(query);
@@ -276,7 +312,14 @@ function AccountPicker({
         inputMode={disableSystemKeyboard ? "none" : "text"}
         readOnly={disableSystemKeyboard}
         onFocus={() => {
+          onSelectField?.(entryId, "account");
           setIsOpen(true);
+        }}
+        onClick={(event) => {
+          onSelectField?.(entryId, "account");
+          if (useTapForVirtualKeyboard) {
+            openAccountVirtualKeyboard(event.currentTarget);
+          }
         }}
         onChange={(event) => handleInputChange(event.target.value)}
         onKeyDown={(event) => {
@@ -294,23 +337,21 @@ function AccountPicker({
             openAccountVirtualKeyboard(event.currentTarget);
           }
         }}
-        onClick={(event) => {
-          if (useTapForVirtualKeyboard) {
-            openAccountVirtualKeyboard(event.currentTarget);
-          }
-        }}
         onBlur={(event) => {
           console.log('🔍 AccountPicker onBlur called');
           // Rimuove la funzione esposta quando il campo perde focus
           const target = event.target as HTMLInputElement;
           delete (target as any)._handleInputChange;
         }}
+        data-journal-entry-id={entryId}
+        data-journal-field="account"
         placeholder="Cerca conto..."
         title={
           useTapForVirtualKeyboard
             ? "Tocca per aprire la tastiera virtuale"
             : "Doppio click per aprire la tastiera virtuale"
         }
+        className={isSelected ? "journal-selected-field" : undefined}
         style={{ cursor: 'pointer' }}
       />
       {isOpen && (
@@ -354,6 +395,12 @@ export function JournalPanel({
   onRemoveEntry,
   onUpdateEntry,
   onOpenVirtualKeyboard,
+  onSelectField,
+  selectedField,
+  onCalculatorTargetChange,
+  calculatorTarget,
+  onScroll,
+  scrollPosition,
   disableSystemKeyboard = true
 }: JournalPanelProps) {
   // Ref per memorizzare il campo target
@@ -375,6 +422,48 @@ export function JournalPanel({
   // Flag per prevenire esecuzioni multiple
   const isProcessingClickRef = useRef(false);
   const useTapForMobileInputs = Boolean(disableSystemKeyboard && isCoarsePointerDevice());
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  const suppressScrollSyncRef = useRef(false);
+
+  const isFieldSelected = (entryId: string, field: JournalFieldKey) =>
+    selectedField?.entryId === entryId && selectedField?.field === field;
+
+  const handleTableScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    if (suppressScrollSyncRef.current) {
+      suppressScrollSyncRef.current = false;
+      return;
+    }
+    const target = event.currentTarget;
+    onScroll?.(target.scrollTop, target.scrollLeft);
+  };
+
+  useEffect(() => {
+    if (!calculatorTarget) {
+      setDestinationField({ entryId: null, field: null });
+      document.querySelectorAll('.calculator-selected-field').forEach(el => {
+        el.classList.remove('calculator-selected-field');
+      });
+      return;
+    }
+    setDestinationField({ entryId: calculatorTarget.entryId, field: calculatorTarget.field });
+    highlightSelectedField(calculatorTarget.entryId, calculatorTarget.field);
+  }, [calculatorTarget]);
+
+  useEffect(() => {
+    if (!scrollPosition) {
+      return;
+    }
+    const container = tableWrapRef.current;
+    if (!container) {
+      return;
+    }
+    const { top, left } = scrollPosition;
+    if (Math.abs(container.scrollTop - top) < 1 && Math.abs(container.scrollLeft - left) < 1) {
+      return;
+    }
+    suppressScrollSyncRef.current = true;
+    container.scrollTo({ top, left, behavior: "auto" });
+  }, [scrollPosition]);
 
   // Funzione per evidenziare il campo selezionato
   const highlightSelectedField = (entryId: string, field: 'debit' | 'credit') => {
@@ -408,6 +497,7 @@ export function JournalPanel({
         
         // Resetta il campo di destinazione quando si chiude la calcolatrice
         setDestinationField({ entryId: null, field: null });
+        onCalculatorTargetChange?.(null);
       }
     };
 
@@ -471,6 +561,8 @@ export function JournalPanel({
     const entryId = target.getAttribute('data-entry-id')!;
     const field = target.getAttribute('data-field') as 'debit' | 'credit';
     const value = target.value;
+
+    onSelectField?.(entryId, field);
     
     // Imposta i data attributes per la calcolatrice
     target.setAttribute('data-calculator-target', entryId);
@@ -529,6 +621,7 @@ export function JournalPanel({
     } else {
       // Calcolatrice chiusa: aprila e imposta il campo di destinazione
       setDestinationField({ entryId, field });
+      onCalculatorTargetChange?.({ entryId, field });
       targetFieldRef.current = { entryId, field, value };
       highlightSelectedField(entryId, field); // Evidenzia il campo selezionato
       
@@ -619,7 +712,7 @@ export function JournalPanel({
         </button>
       </header>
 
-      <div className="journal-table-wrap">
+      <div className="journal-table-wrap" ref={tableWrapRef} onScroll={handleTableScroll}>
         <table className="journal-table">
           <thead>
             <tr>
@@ -641,6 +734,8 @@ export function JournalPanel({
                     value={entry.date ? new Date(entry.date).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : ''}
                     inputMode={disableSystemKeyboard ? "none" : "text"}
                     readOnly={disableSystemKeyboard}
+                    onFocus={() => onSelectField?.(entry.id, "date")}
+                    onClick={() => onSelectField?.(entry.id, "date")}
                     onChange={(event) => {
                       const value = event.target.value;
                       if (!value) {
@@ -670,6 +765,9 @@ export function JournalPanel({
                     }}
                     placeholder="gg/mm"
                     maxLength={10}
+                    data-journal-entry-id={entry.id}
+                    data-journal-field="date"
+                    className={isFieldSelected(entry.id, "date") ? "journal-selected-field" : undefined}
                     style={{ paddingRight: '30px' }}
                   />
                   <input
@@ -684,6 +782,7 @@ export function JournalPanel({
                   <button
                     type="button"
                     onClick={() => {
+                      onSelectField?.(entry.id, "date");
                       const dateInput = document.querySelector(`#journal-date-${entry.id}`) as HTMLInputElement;
                       if (dateInput) {
                         dateInput.style.opacity = '0';
@@ -727,10 +826,13 @@ export function JournalPanel({
                 <td className={entry.closeLine ? "journal-account-cell journal-close-line-cell" : "journal-account-cell"}>
                   <AccountPicker
                     inputId={`journal-account-${entry.id}`}
+                    entryId={entry.id}
                     entry={entry}
                     accounts={accounts}
                     onUpdate={(patch) => onUpdateEntry(entry.id, patch)}
                     onOpenVirtualKeyboard={onOpenVirtualKeyboard}
+                    onSelectField={onSelectField}
+                    isSelected={isFieldSelected(entry.id, "account")}
                     disableSystemKeyboard={disableSystemKeyboard}
                   />
                 </td>
@@ -739,6 +841,7 @@ export function JournalPanel({
                     value={entry.description}
                     inputMode={disableSystemKeyboard ? "none" : "text"}
                     readOnly={disableSystemKeyboard}
+                    onFocus={() => onSelectField?.(entry.id, "description")}
                     onChange={(event) => {
                       const nextValue = event.target.value;
                       console.log('📝 Description onChange called with:', nextValue);
@@ -748,6 +851,7 @@ export function JournalPanel({
                       if (useTapForMobileInputs) {
                         return;
                       }
+                      onSelectField?.(entry.id, "description");
                       const target = event.currentTarget;
                       (target as any)._onUpdateEntry = (value: string) => {
                         onUpdateEntry(entry.id, { description: value });
@@ -760,6 +864,7 @@ export function JournalPanel({
                       if (!useTapForMobileInputs) {
                         return;
                       }
+                      onSelectField?.(entry.id, "description");
                       const target = event.currentTarget;
                       (target as any)._onUpdateEntry = (value: string) => {
                         onUpdateEntry(entry.id, { description: value });
@@ -775,6 +880,9 @@ export function JournalPanel({
                     }}
                     placeholder="Descrizione"
                     title={useTapForMobileInputs ? "Tocca per aprire la tastiera virtuale" : "Doppio click per aprire la tastiera virtuale"}
+                    data-journal-entry-id={entry.id}
+                    data-journal-field="description"
+                    className={isFieldSelected(entry.id, "description") ? "journal-selected-field" : undefined}
                     style={{ cursor: 'pointer' }}
                   />
                 </td>
@@ -785,6 +893,10 @@ export function JournalPanel({
                     readOnly={disableSystemKeyboard}
                     data-entry-id={entry.id}
                     data-field="debit"
+                    data-journal-entry-id={entry.id}
+                    data-journal-field="debit"
+                    className={isFieldSelected(entry.id, "debit") ? "journal-selected-field" : undefined}
+                    onFocus={() => onSelectField?.(entry.id, "debit")}
                     onChange={(event) => {
                       const nextValue = event.target.value;
                       onUpdateEntry(entry.id, { debit: sanitizeAmountTyping(nextValue) });
@@ -805,6 +917,10 @@ export function JournalPanel({
                     readOnly={disableSystemKeyboard}
                     data-entry-id={entry.id}
                     data-field="credit"
+                    data-journal-entry-id={entry.id}
+                    data-journal-field="credit"
+                    className={isFieldSelected(entry.id, "credit") ? "journal-selected-field" : undefined}
+                    onFocus={() => onSelectField?.(entry.id, "credit")}
                     onChange={(event) => {
                       const nextValue = event.target.value;
                       onUpdateEntry(entry.id, { credit: sanitizeAmountTyping(nextValue) });

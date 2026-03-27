@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { JournalPanel, type JournalEntry } from "./components/JournalPanel";
+import { SyncRoomManager } from "./components/SyncRoomManager";
+import { useCanvasSyncMultiRoom, type BoardSyncState, type JournalSyncAction, type JournalSyncState } from "./hooks/useCanvasSyncMultiRoom";
 import {
   DEFAULT_JOURNAL_PROFILE_ID,
   JOURNAL_PROFILE_OPTIONS,
@@ -30,6 +32,10 @@ import { waitForSaveComplete } from "./lib/saveManager";
 type Tool = "pen" | "eraser" | "line" | "pan";
 type SizeLevel = "thin" | "medium" | "large";
 type BackgroundMode = "plain" | "grid";
+type JournalFieldKey = "date" | "account" | "description" | "debit" | "credit";
+type JournalFieldSelection = { entryId: string; field: JournalFieldKey } | null;
+type JournalScrollPosition = { top: number; left: number } | null;
+type CalculatorTarget = { entryId: string; field: "debit" | "credit" } | null;
 
 const IS_TEACHER_MODE = import.meta.env.VITE_TEACHER_MODE === "true";
 const TEACHER_TOKEN = import.meta.env.VITE_TEACHER_TOKEN;
@@ -158,6 +164,16 @@ function createJournalEntries(count: number): JournalEntry[] {
   return Array.from({ length: count }, () => createJournalEntry());
 }
 
+function createJournalEntryWithCarry(previous: JournalEntry[]): JournalEntry {
+  const newEntry = createJournalEntry();
+  if (previous.length === 0) {
+    newEntry.date = new Date().toISOString().split("T")[0];
+  } else {
+    newEntry.date = previous[previous.length - 1]?.date ?? "";
+  }
+  return newEntry;
+}
+
 function normalizeJournalEntries(input: unknown): JournalEntry[] {
   if (!Array.isArray(input)) {
     return [];
@@ -191,6 +207,68 @@ function ensureMinimumJournalEntries(entries: JournalEntry[]): JournalEntry[] {
     return createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
   }
   return [...entries, ...createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES - entries.length)];
+}
+
+function applyJournalEntryPatch(
+  previous: JournalEntry[],
+  entryId: string,
+  patch: Partial<JournalEntry>
+): { entries: JournalEntry[]; didUpdate: boolean } {
+  const currentIndex = previous.findIndex((entry) => entry.id === entryId);
+  if (currentIndex === -1) {
+    return { entries: previous, didUpdate: false };
+  }
+
+  const previousDate = previous[currentIndex]?.date ?? "";
+  const updated = previous.map((entry) => {
+    if (entry.id !== entryId) {
+      return entry;
+    }
+    return {
+      ...entry,
+      ...patch
+    };
+  });
+
+  if ("date" in patch || patch.closeLine || patch.debit || patch.credit) {
+    const nextIndex = currentIndex + 1;
+
+    if (nextIndex < updated.length) {
+      const currentEntry = updated[currentIndex];
+      const nextEntry = updated[nextIndex];
+      const shouldPropagateDate = "date" in patch
+        ? !nextEntry.date || nextEntry.date === previousDate
+        : !nextEntry.date;
+
+      if (shouldPropagateDate) {
+        updated[nextIndex] = {
+          ...nextEntry,
+          date: currentEntry.date
+        };
+      }
+    }
+  }
+
+  return { entries: updated, didUpdate: true };
+}
+
+function applyJournalEntryRemoval(
+  previous: JournalEntry[],
+  entryId: string
+): { entries: JournalEntry[]; didRemove: boolean } {
+  if (previous.length <= MIN_VISIBLE_JOURNAL_ENTRIES) {
+    return { entries: previous, didRemove: false };
+  }
+  const nextEntries = previous.filter((entry) => entry.id !== entryId);
+  if (nextEntries.length === previous.length) {
+    return { entries: previous, didRemove: false };
+  }
+  return {
+    entries: nextEntries.length > 0
+      ? nextEntries
+      : createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES),
+    didRemove: true
+  };
 }
 
 function loadInitialJournalEntries(): JournalEntry[] {
@@ -357,6 +435,9 @@ function App() {
   const [ocrStatus, setOcrStatus] = useState("OCR spento");
   const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
   const [isJournalOpen, setIsJournalOpen] = useState(false);
+  const [selectedJournalField, setSelectedJournalField] = useState<JournalFieldSelection>(null);
+  const [journalScrollPosition, setJournalScrollPosition] = useState<JournalScrollPosition>(null);
+  const [calculatorTarget, setCalculatorTarget] = useState<CalculatorTarget>(null);
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
   const [archiveEntries, setArchiveEntries] = useState<ArchivedBoardDocument[]>([]);
   const [selectedArchiveEntryId, setSelectedArchiveEntryId] = useState<string | null>(null);
@@ -381,6 +462,15 @@ function App() {
   const [selectedJournalProfileId, setSelectedJournalProfileId] = useState<JournalProfileId>(
     DEFAULT_JOURNAL_PROFILE_ID
   );
+  const selectedJournalProfileIdRef = useRef<JournalProfileId>(selectedJournalProfileId);
+  const selectedJournalFieldRef = useRef<JournalFieldSelection>(selectedJournalField);
+  const journalScrollPositionRef = useRef<JournalScrollPosition>(journalScrollPosition);
+  const calculatorTargetRef = useRef<CalculatorTarget>(calculatorTarget);
+  const isJournalOpenRef = useRef(isJournalOpen);
+  const isCalculatorOpenRef = useRef(isCalculatorOpen);
+  const isApplyingRemoteJournalSelectionRef = useRef(false);
+  const suppressNextJournalSelectionRef = useRef(false);
+  const isApplyingRemoteCalculatorStateRef = useRef(false);
   // const [useMathRec, setUseMathRec] = useState(false);
   // const mathRec = useMathRecognition();
   const [isSharingFiles, setIsSharingFiles] = useState(false);
@@ -399,8 +489,28 @@ function App() {
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(
     () => initialDocumentRef.current.journalEntries
   );
+  const journalEntriesRef = useRef<JournalEntry[]>(initialDocumentRef.current.journalEntries);
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => loadInitialBackgroundMode());
+  
+  // 🌐 Esponi backgroundMode globalmente per sincronizzazione
+  useEffect(() => {
+    (window as any).appBackgroundMode = backgroundMode;
+    (window as any).setBackgroundMode = setBackgroundMode;
+  }, [backgroundMode, setBackgroundMode]);
+  
+  // 🚨 Evita sync quando backgroundMode viene applicato remotamente
+  useEffect(() => {
+    if ((window as any).isApplyingRemoteBackgroundMode) {
+      console.log('🚫 [SYNC] Skipping backgroundMode sync - applying remote change');
+      return;
+    }
+    
+    void saveAppSettings({
+      backgroundMode
+    }).catch(() => undefined);
+  }, [backgroundMode]);
   const [display, setDisplay] = useState("");
+  const calculatorDisplayRef = useRef(display);
   const [isVirtualKeyboardOpen, setIsVirtualKeyboardOpen] = useState(false);
   const [disableSystemKeyboard, setDisableSystemKeyboard] = useState(() => {
     // Su dispositivi touch è più pratico avere la tastiera nativa attiva di default.
@@ -416,6 +526,401 @@ function App() {
   const [slotAssignments, setSlotAssignments] = useState<Array<string | null>>(
     () => Array.from({ length: 6 }, () => null) // CANVAS_POOL_SIZE
   );
+
+  const applyJournalState = useCallback((state: JournalSyncState) => {
+    if (!state) {
+      return;
+    }
+    if (typeof state.calculatorDisplay === "string") {
+      isApplyingRemoteCalculatorStateRef.current = true;
+      setDisplay(state.calculatorDisplay);
+    }
+    if (state.selectedField) {
+      isApplyingRemoteJournalSelectionRef.current = true;
+      setSelectedJournalField({
+        entryId: state.selectedField.entryId,
+        field: state.selectedField.field as JournalFieldKey
+      });
+    } else if (state.selectedField === null) {
+      setSelectedJournalField(null);
+    }
+    if (state.calculatorTarget !== undefined) {
+      setCalculatorTarget(
+        state.calculatorTarget
+          ? { entryId: state.calculatorTarget.entryId, field: state.calculatorTarget.field as "debit" | "credit" }
+          : null
+      );
+    }
+    if (state.journalScroll) {
+      journalScrollPositionRef.current = state.journalScroll;
+      setJournalScrollPosition(state.journalScroll);
+    } else if (state.journalScroll === null) {
+      journalScrollPositionRef.current = null;
+      setJournalScrollPosition(null);
+    }
+    if (typeof state.isJournalOpen === "boolean") {
+      setIsJournalOpen(state.isJournalOpen);
+    }
+    if (typeof state.isCalculatorOpen === "boolean") {
+      setIsCalculatorOpen(state.isCalculatorOpen);
+      if (!state.isCalculatorOpen) {
+        setDisplay("");
+      }
+    }
+    if (state.selectedProfileId) {
+      setSelectedJournalProfileId(state.selectedProfileId as JournalProfileId);
+    }
+    const normalizedEntries = ensureMinimumJournalEntries(
+      normalizeJournalEntries(state.entries)
+    );
+    setJournalEntries(normalizedEntries);
+  }, []);
+
+  const applyJournalEntryAdd = useCallback((entry: JournalEntry) => {
+    if (!entry) {
+      return;
+    }
+    setJournalEntries((previous) => {
+      if (previous.some((existing) => existing.id === entry.id)) {
+        return previous;
+      }
+      return [...previous, entry];
+    });
+  }, []);
+
+  const applyJournalEntryUpdate = useCallback((entryId: string, patch: Partial<JournalEntry>) => {
+    setJournalEntries((previous) => applyJournalEntryPatch(previous, entryId, patch).entries);
+  }, []);
+
+  const applyJournalEntryRemove = useCallback((entryId: string) => {
+    setJournalEntries((previous) => applyJournalEntryRemoval(previous, entryId).entries);
+  }, []);
+
+  const applyJournalProfile = useCallback((profileId: JournalProfileId) => {
+    setSelectedJournalProfileId(profileId);
+  }, []);
+
+  const applyJournalAction = useCallback((action: JournalSyncAction) => {
+    if (!action) {
+      return;
+    }
+    switch (action.type) {
+      case "journal-add":
+        applyJournalEntryAdd(action.entry as JournalEntry);
+        break;
+      case "journal-update":
+        applyJournalEntryUpdate(action.entryId, action.patch ?? {});
+        break;
+      case "journal-remove":
+        applyJournalEntryRemove(action.entryId);
+        break;
+      case "journal-set":
+        applyJournalState({
+          entries: action.entries ?? [],
+          selectedProfileId: action.selectedProfileId,
+          isJournalOpen: action.isJournalOpen,
+          isCalculatorOpen: action.isCalculatorOpen,
+          calculatorDisplay: action.calculatorDisplay,
+          selectedField: action.selectedField ?? null,
+          calculatorTarget: action.calculatorTarget ?? null,
+          journalScroll: action.journalScroll ?? null
+        });
+        break;
+      case "journal-profile":
+        if (action.profileId) {
+          applyJournalProfile(action.profileId as JournalProfileId);
+        }
+        break;
+      case "journal-panel":
+        if (typeof action.isOpen === "boolean") {
+          setIsJournalOpen(action.isOpen);
+        }
+        break;
+      case "calculator-open":
+        if (typeof action.isOpen === "boolean") {
+          setIsCalculatorOpen(action.isOpen);
+          if (!action.isOpen) {
+            setDisplay("");
+          }
+        }
+        break;
+      case "calculator-state":
+        if (typeof action.display === "string") {
+          isApplyingRemoteCalculatorStateRef.current = true;
+          setDisplay(action.display);
+        }
+        break;
+      case "calculator-result":
+        if (typeof action.value === "string") {
+          const event = new CustomEvent('calculator-input', {
+            detail: { value: action.value, isResult: true }
+          });
+          window.dispatchEvent(event);
+        }
+        break;
+      case "calculator-target":
+        setCalculatorTarget(
+          action.target
+            ? { entryId: action.target.entryId, field: action.target.field as "debit" | "credit" }
+            : null
+        );
+        break;
+      case "journal-select-field":
+        if (action.entryId && action.field) {
+          isApplyingRemoteJournalSelectionRef.current = true;
+          setSelectedJournalField({
+            entryId: action.entryId,
+            field: action.field as JournalFieldKey
+          });
+        }
+        break;
+      case "journal-scroll":
+        if (Number.isFinite(action.top) && Number.isFinite(action.left)) {
+          const nextScroll = { top: action.top, left: action.left };
+          journalScrollPositionRef.current = nextScroll;
+          setJournalScrollPosition(nextScroll);
+        }
+        break;
+      default:
+        break;
+    }
+  }, [applyJournalEntryAdd, applyJournalEntryRemove, applyJournalEntryUpdate, applyJournalProfile, applyJournalState]);
+
+  const journalSyncHandlers = useMemo(() => ({
+    getState: () => ({
+      entries: journalEntriesRef.current,
+      selectedProfileId: selectedJournalProfileIdRef.current,
+      isJournalOpen: isJournalOpenRef.current,
+      isCalculatorOpen: isCalculatorOpenRef.current,
+      calculatorDisplay: calculatorDisplayRef.current,
+      selectedField: selectedJournalFieldRef.current,
+      calculatorTarget: calculatorTargetRef.current,
+      journalScroll: journalScrollPositionRef.current
+    }),
+    onAction: applyJournalAction,
+    onState: applyJournalState
+  }), [applyJournalAction, applyJournalState]);
+
+  const isApplyingRemoteBoardStateRef = useRef(false);
+  const boardSyncTimeoutRef = useRef<number | null>(null);
+
+  const buildBoardSyncState = useCallback((): BoardSyncState | null => {
+    const container = containerRef.current;
+    const scrollTop = container?.scrollTop ?? 0;
+    const scrollLeft = container?.scrollLeft ?? 0;
+    return {
+      pageCount: pagesRef.current.length,
+      currentPageIndex: currentPageIndexRef.current,
+      scrollTop,
+      scrollLeft
+    };
+  }, []);
+
+  const flushDocumentSave = useCallback(() => {
+    const pendingDocument = pendingDocumentSaveRef.current;
+    if (!pendingDocument) {
+      return;
+    }
+    pendingDocumentSaveRef.current = null;
+    void saveLastBoardDocument(pendingDocument).catch(() => undefined);
+  }, []);
+
+  const scheduleDocumentSave = useCallback(
+    (document: PersistedDocument) => {
+      pendingDocumentSaveRef.current = document;
+      if (documentSaveTimeoutRef.current !== null) {
+        window.clearTimeout(documentSaveTimeoutRef.current);
+      }
+      documentSaveTimeoutRef.current = window.setTimeout(() => {
+        documentSaveTimeoutRef.current = null;
+        flushDocumentSave();
+      }, DOCUMENT_SAVE_DEBOUNCE_MS);
+    },
+    [flushDocumentSave]
+  );
+
+  const buildPersistedDocument = useCallback(
+    (nextPages: Page[], nextPageCanvasData: PageCanvasDataMap, nextJournalEntries: JournalEntry[]): PersistedDocument => {
+      const firstPageId = nextPages[0]?.id ?? null;
+      return {
+        pages: nextPages,
+        canvasData: firstPageId ? nextPageCanvasData[firstPageId] ?? null : null,
+        pageCanvasData: nextPageCanvasData,
+        journalEntries: nextJournalEntries
+      };
+    },
+    []
+  );
+
+  const persistDocument = useCallback((nextPages: Page[], nextPageCanvasData: PageCanvasDataMap) => {
+    pagesRef.current = nextPages;
+    pageCanvasDataRef.current = nextPageCanvasData;
+    setPages(nextPages);
+    scheduleDocumentSave(
+      buildPersistedDocument(nextPages, nextPageCanvasData, journalEntriesRef.current) satisfies PersistedDocument
+    );
+  }, [buildPersistedDocument, scheduleDocumentSave]);
+
+  const getCanvasByPageId = useCallback((pageId: string | null) => {
+    if (!pageId) {
+      return null;
+    }
+    const slotId = pageSlotMapRef.current.get(pageId);
+    if (slotId === undefined) {
+      return null;
+    }
+    return fabricCanvasMapRef.current.get(slotId) ?? null;
+  }, []);
+
+  const getCurrentPageId = useCallback(() => {
+    return pagesRef.current[currentPageIndexRef.current]?.id ?? null;
+  }, []);
+
+  const getActiveCanvas = useCallback(() => {
+    const currentPageId = getCurrentPageId();
+    if (!currentPageId) {
+      return null;
+    }
+    return getCanvasByPageId(currentPageId);
+  }, [getCurrentPageId, getCanvasByPageId]);
+
+  const getSelectionCanvasByPageId = useCallback((pageId: string | null) => {
+    if (!pageId) {
+      return null;
+    }
+    const slotId = pageSlotMapRef.current.get(pageId);
+    if (slotId === undefined) {
+      return null;
+    }
+    return selectionCanvasElementsRef.current.get(slotId) ?? null;
+  }, []);
+
+  const syncCanvasOffset = useCallback(() => {
+    const canvas = getActiveCanvas();
+    if (!canvas) {
+      return;
+    }
+    canvas.calcOffset();
+  }, [getActiveCanvas]);
+
+  const applyBoardSyncState = useCallback((state: BoardSyncState) => {
+    if (!state) {
+      return;
+    }
+    isApplyingRemoteBoardStateRef.current = true;
+
+    try {
+      const desiredCount = Math.max(1, Math.floor(state.pageCount || 1));
+      if (desiredCount > pagesRef.current.length) {
+        const nextPages = [...pagesRef.current];
+        const nextPageCanvasData: PageCanvasDataMap = { ...pageCanvasDataRef.current };
+        for (let i = nextPages.length; i < desiredCount; i += 1) {
+          const nextPage = createPage(i);
+          nextPages.push(nextPage);
+          nextPageCanvasData[nextPage.id] = null;
+          historyStacksRef.current[nextPage.id] = { undo: [], redo: [] };
+        }
+        persistDocument(nextPages, nextPageCanvasData);
+      } else if (desiredCount < pagesRef.current.length) {
+        console.log(`⚠️ [Sync] Ignoro riduzione pagine (${pagesRef.current.length} -> ${desiredCount})`);
+      }
+
+      const maxIndex = Math.max(0, pagesRef.current.length - 1);
+      const clampedIndex = clamp(state.currentPageIndex ?? 0, 0, maxIndex);
+      currentPageIndexRef.current = clampedIndex;
+      setCurrentPageIndex(clampedIndex);
+
+      const container = containerRef.current;
+      if (container) {
+        container.scrollTo({
+          top: Math.max(0, state.scrollTop ?? 0),
+          left: Math.max(0, state.scrollLeft ?? 0),
+          behavior: "auto"
+        });
+      }
+      syncCanvasOffset();
+    } finally {
+      window.setTimeout(() => {
+        isApplyingRemoteBoardStateRef.current = false;
+      }, 200);
+    }
+  }, [persistDocument, setCurrentPageIndex, syncCanvasOffset]);
+
+  const boardSyncHandlers = useMemo(() => ({
+    getState: buildBoardSyncState,
+    onState: applyBoardSyncState
+  }), [applyBoardSyncState, buildBoardSyncState]);
+
+  // SYNC MULTI-ROOM
+  // ============================================================
+  const syncCanvasRef = useRef<any>(null);
+  
+  const {
+    isConnected: syncIsConnected,
+    currentRoom: syncCurrentRoom,
+    latency: syncLatency,
+    connectedUsers: syncConnectedUsers,
+    joinRoom: syncJoinRoom,
+    leaveRoom: syncLeaveRoom,
+    wsRef: syncWsRef,
+    clientIdRef: syncClientIdRef,
+    currentRoomRef: syncCurrentRoomRef,
+    sendJournalAction,
+    sendJournalState,
+    sendBoardState,
+    sendCanvasFullState,
+    isApplyingRemoteChangeRef
+  } = useCanvasSyncMultiRoom(
+    syncCanvasRef,
+    `ws://${window.location.hostname}:3001`,
+    `document-0`, // ID documento fisso per ora, poi renderemo dinamico
+    journalSyncHandlers,
+    boardSyncHandlers
+  );
+
+  useEffect(() => {
+    const pageId = pages[currentPageIndex]?.id;
+    if (!pageId) {
+      return;
+    }
+    const slotId = pageSlotMapRef.current.get(pageId);
+    if (slotId === undefined) {
+      return;
+    }
+    const canvas = fabricCanvasMapRef.current.get(slotId);
+    if (canvas && canvas !== syncCanvasRef.current) {
+      console.log('[App] setSyncCanvas called with lowerCanvasEl:', (canvas as any)?.lowerCanvasEl?.id);
+      syncCanvasRef.current = canvas;
+    }
+  }, [currentPageIndex, pages, slotAssignments]);
+
+  // Aggiorna il canvas per il sync quando disponibile
+  useEffect(() => {
+    // Aspetta che il canvas sia completamente inizializzato
+    const timeoutId = setTimeout(() => {
+      console.log('🔄 [Sync] Checking canvas availability...');
+      console.log('🔄 [Sync] activeCanvasPageIdRef.current:', activeCanvasPageIdRef.current);
+      console.log('🔄 [Sync] fabricCanvasMapRef.current.size:', fabricCanvasMapRef.current?.size);
+      console.log('🔄 [Sync] pageSlotMapRef.current.size:', pageSlotMapRef.current?.size);
+      
+      if (activeCanvasPageIdRef.current && fabricCanvasMapRef.current) {
+        const slotId = pageSlotMapRef.current.get(activeCanvasPageIdRef.current);
+        console.log('🔄 [Sync] slotId for page:', slotId);
+        
+        if (slotId !== undefined && fabricCanvasMapRef.current.has(slotId)) {
+          const canvas = fabricCanvasMapRef.current.get(slotId);
+          console.log('🔄 [Sync] Canvas passed to sync:', canvas ? 'YES' : 'NO');
+          syncCanvasRef.current = canvas;
+        } else {
+          console.log('🔄 [Sync] No canvas found for slotId:', slotId);
+        }
+      } else {
+        console.log('🔄 [Sync] No active page or canvas map available');
+      }
+    }, 2000); // Aspetta 2 secondi
+
+    return () => clearTimeout(timeoutId);
+  }, []); // Dipendenze vuote per evitare errori di inizializzazione
 
   const authEmail = authUser?.email?.toLowerCase() ?? "";
   const isTeacherByEmail =
@@ -502,8 +1007,9 @@ function App() {
 
   const pagesRef = useRef<Page[]>(pages);
   const pageCanvasDataRef = useRef<PageCanvasDataMap>(initialPageCanvasDataRef.current);
-  const journalEntriesRef = useRef<JournalEntry[]>(initialDocumentRef.current.journalEntries);
   const currentPageIndexRef = useRef(currentPageIndex);
+  const syncFullStateTimeoutRef = useRef<number | null>(null);
+  const remoteSnapshotTimeoutRef = useRef<number | null>(null);
   const pendingDocumentSaveRef = useRef<PersistedDocument | null>(null);
   const documentSaveTimeoutRef = useRef<number | null>(null);
   const hasHydratedFromIndexedDbRef = useRef(false);
@@ -919,63 +1425,14 @@ function App() {
       .slice(0, CANVAS_POOL_SIZE)
       .map((item) => item.pageId);
 
-    return pages
-      .map((page) => page.id)
-      .filter((pageId) => prioritized.includes(pageId));
+    return orderedIds;
   }, [currentPageIndex, intersectingPageIds, pageIndexById, pages, windowPageIndexes]);
-
-  const getCurrentPageId = useCallback(() => {
-    return pagesRef.current[currentPageIndexRef.current]?.id ?? null;
-  }, []);
-
-  const getCanvasByPageId = useCallback((pageId: string | null) => {
-    if (!pageId) {
-      return null;
-    }
-    const slotId = pageSlotMapRef.current.get(pageId);
-    if (slotId === undefined) {
-      return null;
-    }
-    return fabricCanvasMapRef.current.get(slotId) ?? null;
-  }, []);
-
-  const getActiveCanvas = useCallback(() => {
-    return getCanvasByPageId(getCurrentPageId());
-  }, [getCanvasByPageId, getCurrentPageId]);
-
-  const getSelectionCanvasByPageId = useCallback((pageId: string | null) => {
-    if (!pageId) {
-      return null;
-    }
-    const slotId = pageSlotMapRef.current.get(pageId);
-    if (slotId === undefined) {
-      return null;
-    }
-    return selectionCanvasElementsRef.current.get(slotId) ?? null;
-  }, []);
-
-  const syncCanvasOffset = useCallback(() => {
-    const canvas = getActiveCanvas();
-    if (!canvas) {
-      return;
-    }
-    canvas.calcOffset();
-  }, [getActiveCanvas]);
 
   const setActiveArchiveDocumentId = useCallback((archiveId: string | null) => {
     activeArchiveDocumentIdRef.current = archiveId;
     void saveAppSettings({
       activeArchiveDocumentId: archiveId
     }).catch(() => undefined);
-  }, []);
-
-  const flushDocumentSave = useCallback(() => {
-    const pendingDocument = pendingDocumentSaveRef.current;
-    if (!pendingDocument) {
-      return;
-    }
-    pendingDocumentSaveRef.current = null;
-    void saveLastBoardDocument(pendingDocument).catch(() => undefined);
   }, []);
 
   const flushPendingDocumentSaveNow = useCallback(() => {
@@ -991,42 +1448,6 @@ function App() {
     pendingDocumentSaveRef.current = null;
     void saveLastBoardDocument(pendingDocument).catch(() => undefined);
   }, []);
-
-  const scheduleDocumentSave = useCallback(
-    (document: PersistedDocument) => {
-      pendingDocumentSaveRef.current = document;
-      if (documentSaveTimeoutRef.current !== null) {
-        window.clearTimeout(documentSaveTimeoutRef.current);
-      }
-      documentSaveTimeoutRef.current = window.setTimeout(() => {
-        documentSaveTimeoutRef.current = null;
-        flushDocumentSave();
-      }, DOCUMENT_SAVE_DEBOUNCE_MS);
-    },
-    [flushDocumentSave]
-  );
-
-  const buildPersistedDocument = useCallback(
-    (nextPages: Page[], nextPageCanvasData: PageCanvasDataMap, nextJournalEntries: JournalEntry[]): PersistedDocument => {
-      const firstPageId = nextPages[0]?.id ?? null;
-      return {
-        pages: nextPages,
-        canvasData: firstPageId ? nextPageCanvasData[firstPageId] ?? null : null,
-        pageCanvasData: nextPageCanvasData,
-        journalEntries: nextJournalEntries
-      };
-    },
-    []
-  );
-
-  const persistDocument = useCallback((nextPages: Page[], nextPageCanvasData: PageCanvasDataMap) => {
-    pagesRef.current = nextPages;
-    pageCanvasDataRef.current = nextPageCanvasData;
-    setPages(nextPages);
-    scheduleDocumentSave(
-      buildPersistedDocument(nextPages, nextPageCanvasData, journalEntriesRef.current) satisfies PersistedDocument
-    );
-  }, [buildPersistedDocument, scheduleDocumentSave]);
 
   const snapshotCanvasByPageId = useCallback((pageId: string): string | null => {
     const canvas = getCanvasByPageId(pageId);
@@ -1998,8 +2419,57 @@ function App() {
       .catch(() => undefined);
   }, [buildArchivePreviewImagesSyncFallback, buildCurrentDocumentSnapshot, flushPendingDocumentSaveNow, setActiveArchiveDocumentId]);
 
+  const scheduleCanvasFullSync = useCallback(() => {
+    console.log('🚀 [SYNC] scheduleCanvasFullSync called');
+    if (syncFullStateTimeoutRef.current !== null) {
+      window.clearTimeout(syncFullStateTimeoutRef.current);
+    }
+    syncFullStateTimeoutRef.current = window.setTimeout(() => {
+      syncFullStateTimeoutRef.current = null;
+      console.log('📤 [SYNC] About to call sendCanvasFullState');
+      sendCanvasFullState();
+    }, 50); // 🚀 Ridotto da 150ms a 50ms per migliorare reattività
+  }, [sendCanvasFullState]);
+
+  const scheduleBoardStateSync = useCallback(() => {
+    if (isApplyingRemoteBoardStateRef.current) {
+      return;
+    }
+    if (boardSyncTimeoutRef.current !== null) {
+      window.clearTimeout(boardSyncTimeoutRef.current);
+    }
+    boardSyncTimeoutRef.current = window.setTimeout(() => {
+      boardSyncTimeoutRef.current = null;
+      if (isApplyingRemoteBoardStateRef.current) {
+        return;
+      }
+      const state = buildBoardSyncState();
+      if (state) {
+        sendBoardState(state);
+      }
+    }, 120);
+  }, [buildBoardSyncState, sendBoardState]);
+
+  useEffect(() => {
+    return () => {
+      if (boardSyncTimeoutRef.current !== null) {
+        window.clearTimeout(boardSyncTimeoutRef.current);
+        boardSyncTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   const pushHistoryState = useCallback((pageId?: string | null) => {
+    console.log('📝 [SYNC] pushHistoryState called with pageId:', pageId);
     if (isRestoringRef.current) {
+      console.log('🚫 [SYNC] Skipping - isRestoringRef is true');
+      return;
+    }
+    // 🚫 BLOCCA SYNC durante applicazione stato remoto per evitare loop infinito
+    console.log('🔍 [DEBUG] isApplyingRemoteChangeRef:', isApplyingRemoteChangeRef);
+    console.log('🔍 [DEBUG] isApplyingRemoteChangeRef.current:', isApplyingRemoteChangeRef?.current);
+    if (isApplyingRemoteChangeRef?.current) {
+      console.log('🚫 [SYNC] Skipping - applying remote change');
       return;
     }
     const resolvedPageId = pageId ?? getCurrentPageId();
@@ -2030,7 +2500,61 @@ function App() {
       [resolvedPageId]: snapshot
     };
     persistDocument(pagesRef.current, nextPageCanvasData);
-  }, [getCurrentPageId, persistDocument, snapshotCanvasByPageId]);
+    scheduleCanvasFullSync();
+  }, [getCurrentPageId, persistDocument, scheduleCanvasFullSync, snapshotCanvasByPageId]);
+
+  const pushRemoteHistoryState = useCallback((pageId: string) => {
+    if (isRestoringRef.current) {
+      return;
+    }
+    const snapshot = snapshotCanvasByPageId(pageId);
+    if (!snapshot) {
+      return;
+    }
+
+    const pageHistory = historyStacksRef.current[pageId] ?? { undo: [], redo: [] };
+    if (pageHistory.undo[pageHistory.undo.length - 1] === snapshot) {
+      return;
+    }
+
+    pageHistory.undo.push(snapshot);
+    if (pageHistory.undo.length > MAX_HISTORY) {
+      pageHistory.undo.shift();
+    }
+    pageHistory.redo = [];
+    historyStacksRef.current[pageId] = pageHistory;
+
+    const nextPageCanvasData = {
+      ...pageCanvasDataRef.current,
+      [pageId]: snapshot
+    };
+    persistDocument(pagesRef.current, nextPageCanvasData);
+  }, [persistDocument, snapshotCanvasByPageId]);
+
+  useEffect(() => {
+    const handler = () => {
+      if (remoteSnapshotTimeoutRef.current !== null) {
+        return;
+      }
+      remoteSnapshotTimeoutRef.current = window.setTimeout(() => {
+        remoteSnapshotTimeoutRef.current = null;
+        const pageId = activeCanvasPageIdRef.current;
+        if (!pageId) {
+          return;
+        }
+        pushRemoteHistoryState(pageId);
+      }, 120);
+    };
+
+    window.addEventListener('sync-canvas-remote-applied', handler as EventListener);
+    return () => {
+      window.removeEventListener('sync-canvas-remote-applied', handler as EventListener);
+      if (remoteSnapshotTimeoutRef.current !== null) {
+        window.clearTimeout(remoteSnapshotTimeoutRef.current);
+        remoteSnapshotTimeoutRef.current = null;
+      }
+    };
+  }, [pushRemoteHistoryState]);
 
   const handlePathCreated = useCallback(
     (pageId: string, event: unknown) => {
@@ -2131,6 +2655,10 @@ function App() {
     }
     detachToolHandlers(pageId);
     activeCanvasPageIdRef.current = pageId;
+    if (syncCanvasRef.current !== canvas) {
+      console.log('[App] setSyncCanvas from configureActiveTool:', (canvas as any)?.lowerCanvasEl?.id);
+      syncCanvasRef.current = canvas;
+    }
     for (const mappedCanvas of fabricCanvasMapRef.current.values()) {
       if (mappedCanvas === canvas) {
         continue;
@@ -2220,21 +2748,18 @@ function App() {
         container?.classList.remove("is-panning");
       };
 
-      (canvas as unknown as { skipTargetFind?: boolean }).skipTargetFind = false;
-      canvas.selection = false;
-      setCanvasPanObjectInteractivity(canvas, true);
+    (canvas as unknown as { skipTargetFind?: boolean }).skipTargetFind = false;
+    canvas.selection = false;
+    setCanvasPanObjectInteractivity(canvas, true);
 
       const down = (event: unknown) => {
-        const opt = event as { e: Event; target?: unknown };
-        if (opt.target) {
+        if (!container) {
           return;
         }
+        const opt = event as { e: Event };
         const rawEvent = opt.e;
-        if (rawEvent instanceof MouseEvent && rawEvent.button !== 0) {
-          return;
-        }
         const position = getClientPositionFromEvent(rawEvent);
-        if (!position || !container) {
+        if (!position) {
           return;
         }
         isPanning = true;
@@ -2929,86 +3454,185 @@ function App() {
   }, [getCurrentPageId, loadCanvasDataForPage, persistDocument]);
 
   const addJournalEntry = useCallback(() => {
+    let createdEntry: JournalEntry | null = null;
     setJournalEntries((previous) => {
       if (previous.length >= MAX_JOURNAL_ENTRIES) {
         window.alert(`Hai raggiunto il limite massimo di ${MAX_JOURNAL_ENTRIES} righe compilabili.`);
         return previous;
       }
-      
-      const newEntry = createJournalEntry();
-      
-      // Copia data dalla riga precedente, o usa data di oggi per la prima riga
-      if (previous.length === 0) {
-        newEntry.date = new Date().toISOString().split('T')[0];
-      } else {
-        const lastEntry = previous[previous.length - 1];
-        newEntry.date = lastEntry.date;
-      }
-      
+
+      const newEntry = createJournalEntryWithCarry(previous);
+      createdEntry = newEntry;
       return [...previous, newEntry];
     });
-  }, []);
+
+    if (createdEntry) {
+      sendJournalAction({
+        type: "journal-add",
+        entry: createdEntry
+      });
+    }
+  }, [sendJournalAction]);
 
   const clearJournalEntries = useCallback(() => {
     if (!window.confirm("Vuoi svuotare tutte le righe del Libro Giornale?")) {
       return;
     }
-    setJournalEntries(createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES));
-  }, []);
+    const clearedEntries = createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
+    setJournalEntries(clearedEntries);
+    sendJournalState({
+      entries: clearedEntries,
+      selectedProfileId: selectedJournalProfileIdRef.current
+    });
+  }, [sendJournalState]);
 
   const removeJournalEntry = useCallback((entryId: string) => {
+    let didRemove = false;
     setJournalEntries((previous) => {
-      if (previous.length <= MIN_VISIBLE_JOURNAL_ENTRIES) {
-        return previous;
-      }
-      const nextEntries = previous.filter((entry) => entry.id !== entryId);
-      return nextEntries.length > 0
-        ? nextEntries
-        : createJournalEntries(MIN_VISIBLE_JOURNAL_ENTRIES);
+      const result = applyJournalEntryRemoval(previous, entryId);
+      didRemove = result.didRemove;
+      return result.entries;
     });
-  }, []);
+
+    if (didRemove) {
+      sendJournalAction({
+        type: "journal-remove",
+        entryId
+      });
+    }
+  }, [sendJournalAction]);
 
   const updateJournalEntry = useCallback((entryId: string, patch: Partial<JournalEntry>) => {
+    let didUpdate = false;
     setJournalEntries((previous) => {
-      const currentIndex = previous.findIndex((entry) => entry.id === entryId);
-      if (currentIndex === -1) {
-        return previous;
-      }
-      const previousDate = previous[currentIndex]?.date ?? "";
-      const updated = previous.map((entry) => {
-        if (entry.id !== entryId) {
-          return entry;
-        }
-        return {
-          ...entry,
-          ...patch
-        };
-      });
-
-      // Se la data e' stata aggiornata o se e' stata attivata la linea di chiusura o se e' stato inserito importo,
-      // copia alla riga successiva se vuota
-      if ("date" in patch || patch.closeLine || patch.debit || patch.credit) {
-        const nextIndex = currentIndex + 1;
-
-        if (nextIndex < updated.length) {
-          const currentEntry = updated[currentIndex];
-          const nextEntry = updated[nextIndex];
-          const shouldPropagateDate = "date" in patch
-            ? !nextEntry.date || nextEntry.date === previousDate
-            : !nextEntry.date;
-
-          if (shouldPropagateDate) {
-            updated[nextIndex] = {
-              ...nextEntry,
-              date: currentEntry.date
-            };
-          }
-        }
-      }
-
-      return updated;
+      const result = applyJournalEntryPatch(previous, entryId, patch);
+      didUpdate = result.didUpdate;
+      return result.entries;
     });
-  }, []);
+
+    if (didUpdate) {
+      sendJournalAction({
+        type: "journal-update",
+        entryId,
+        patch
+      });
+    }
+  }, [sendJournalAction]);
+
+  const changeJournalProfile = useCallback((profileId: JournalProfileId) => {
+    setSelectedJournalProfileId(profileId);
+    sendJournalAction({
+      type: "journal-profile",
+      profileId
+    });
+  }, [sendJournalAction]);
+
+  const handleJournalFieldSelect = useCallback((entryId: string, field: JournalFieldKey) => {
+    if (suppressNextJournalSelectionRef.current) {
+      suppressNextJournalSelectionRef.current = false;
+      return;
+    }
+    const current = selectedJournalFieldRef.current;
+    if (current?.entryId === entryId && current?.field === field) {
+      return;
+    }
+    selectedJournalFieldRef.current = { entryId, field };
+    setSelectedJournalField({ entryId, field });
+    sendJournalAction({
+      type: "journal-select-field",
+      entryId,
+      field
+    });
+  }, [sendJournalAction]);
+
+  const handleJournalScroll = useCallback((top: number, left: number) => {
+    const current = journalScrollPositionRef.current;
+    if (current && Math.abs(current.top - top) < 1 && Math.abs(current.left - left) < 1) {
+      return;
+    }
+    const nextScroll = { top, left };
+    journalScrollPositionRef.current = nextScroll;
+    setJournalScrollPosition(nextScroll);
+    sendJournalAction({
+      type: "journal-scroll",
+      top,
+      left
+    });
+  }, [sendJournalAction]);
+
+  const sendCalculatorResult = useCallback((value: string) => {
+    sendJournalAction({
+      type: "calculator-result",
+      value
+    });
+  }, [sendJournalAction]);
+
+  const handleCalculatorTargetChange = useCallback((target: CalculatorTarget) => {
+    setCalculatorTarget(target);
+    sendJournalAction({
+      type: "calculator-target",
+      target
+    });
+  }, [sendJournalAction]);
+
+  const toggleJournalPanel = useCallback(() => {
+    setIsJournalOpen((value) => {
+      const nextValue = !value;
+      sendJournalAction({
+        type: "journal-panel",
+        isOpen: nextValue
+      });
+      return nextValue;
+    });
+  }, [sendJournalAction]);
+
+  const closeJournalPanel = useCallback(() => {
+    setIsJournalOpen((value) => {
+      if (!value) {
+        return value;
+      }
+      sendJournalAction({
+        type: "journal-panel",
+        isOpen: false
+      });
+      return false;
+    });
+  }, [sendJournalAction]);
+
+  const toggleCalculatorPanel = useCallback(() => {
+    setIsCalculatorOpen((value) => {
+      const nextValue = !value;
+      sendJournalAction({
+        type: "calculator-open",
+        isOpen: nextValue
+      });
+      return nextValue;
+    });
+  }, [sendJournalAction]);
+
+  const setCalculatorOpenWithSync = useCallback((isOpen: boolean) => {
+    setIsCalculatorOpen((value) => {
+      if (value === isOpen) {
+        return value;
+      }
+      sendJournalAction({
+        type: "calculator-open",
+        isOpen
+      });
+      return isOpen;
+    });
+  }, [sendJournalAction]);
+
+  useEffect(() => {
+    if (isApplyingRemoteCalculatorStateRef.current) {
+      isApplyingRemoteCalculatorStateRef.current = false;
+      return;
+    }
+    sendJournalAction({
+      type: "calculator-state",
+      display
+    });
+  }, [display, sendJournalAction]);
 
   const extractJournalData = useCallback(async () => {
     setIsJournalExtracting(true);
@@ -3454,9 +4078,10 @@ function App() {
           detail: { value: result, isResult: true }
         });
         window.dispatchEvent(event);
+        sendCalculatorResult(result);
       }
     }
-  }, [display, solveDisplayExpression]);
+  }, [display, sendCalculatorResult, solveDisplayExpression]);
 
   const syncCalculatorSelection = useCallback(() => {
     const input = calculatorInputRef.current;
@@ -3575,10 +4200,11 @@ function App() {
             detail: { value: currentValue, isResult: true }
           });
           window.dispatchEvent(event);
+          sendCalculatorResult(currentValue);
         }
         
         // Chiudi la calcolatrice
-        setIsCalculatorOpen(false);
+        setCalculatorOpenWithSync(false);
         setDisplay("");
       }
     };
@@ -3587,7 +4213,7 @@ function App() {
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [isCalculatorOpen, display]);
+  }, [display, isCalculatorOpen, sendCalculatorResult, setCalculatorOpenWithSync]);
 
   // Funzioni per tastiera virtuale
   const openVirtualKeyboard = useCallback((element: HTMLInputElement, field: string) => {
@@ -4506,11 +5132,31 @@ function App() {
       fabricCanvasMapRef.current.set(slotId, canvas);
 
       const onPathCreated = (event: unknown) => {
+        console.log('[App] path:created fired on slot canvas, isDrawingMode:', canvas.isDrawingMode, 'lowerCanvasEl:', (canvas as any).lowerCanvasEl?.id);
+        console.log('🎨 [SYNC] onPathCreated callback triggered!');
         const pageId = slotPageMapRef.current.get(slotId);
         if (!pageId) {
+          console.log('❌ [SYNC] No pageId found for slot:', slotId);
           return;
         }
         handlePathCreated(pageId, event);
+
+        // Sync: invia il path appena creato
+        const pathObj = (event as any)?.path;
+        if (pathObj && syncCurrentRoomRef.current && syncWsRef.current?.readyState === WebSocket.OPEN) {
+          if (!pathObj.id) {
+            pathObj.id = `obj-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          }
+          syncWsRef.current.send(JSON.stringify({
+            type: 'canvas-update',
+            update: {
+              type: 'object:added',
+              data: { ...pathObj.toJSON(['id']), id: pathObj.id },
+              timestamp: Date.now()
+            },
+            clientId: syncClientIdRef.current
+          }));
+        }
       };
       const onObjectModified = () => {
         const pageId = slotPageMapRef.current.get(slotId);
@@ -4586,6 +5232,9 @@ function App() {
     canvasWithCleanup.__cleanup?.();
     canvas.dispose();
     fabricCanvasMapRef.current.delete(slotId);
+    if (syncCanvasRef.current === canvas) {
+      syncCanvasRef.current = null;
+    }
   }, [detachToolHandlers]);
 
   const bindDrawingCanvasRef = useCallback(
@@ -4993,6 +5642,7 @@ function App() {
           VIRTUALIZATION_BUFFER_PAGES
         )
       );
+      scheduleBoardStateSync();
 
       const nearBottom =
         container.scrollTop + container.clientHeight >=
@@ -5018,7 +5668,7 @@ function App() {
     return () => {
       container.removeEventListener("scroll", onScroll);
     };
-  }, [addPage, isCanvasReady, isOcrRunning, isSelectionMode, setCurrentPageFromIndex, syncCanvasOffset]);
+  }, [addPage, isCanvasReady, isOcrRunning, isSelectionMode, scheduleBoardStateSync, setCurrentPageFromIndex, syncCanvasOffset]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -5034,6 +5684,10 @@ function App() {
       )
     );
   }, [pages.length]);
+
+  useEffect(() => {
+    scheduleBoardStateSync();
+  }, [currentPageIndex, pages.length, scheduleBoardStateSync]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -5229,6 +5883,54 @@ function App() {
   }, [isEraserSizeMenuOpen, isPenSizeMenuOpen]);
 
   useEffect(() => {
+    selectedJournalProfileIdRef.current = selectedJournalProfileId;
+  }, [selectedJournalProfileId]);
+
+  useEffect(() => {
+    selectedJournalFieldRef.current = selectedJournalField;
+  }, [selectedJournalField]);
+
+  useEffect(() => {
+    journalScrollPositionRef.current = journalScrollPosition;
+  }, [journalScrollPosition]);
+
+  useEffect(() => {
+    calculatorTargetRef.current = calculatorTarget;
+  }, [calculatorTarget]);
+
+  useEffect(() => {
+    isJournalOpenRef.current = isJournalOpen;
+  }, [isJournalOpen]);
+
+  useEffect(() => {
+    isCalculatorOpenRef.current = isCalculatorOpen;
+  }, [isCalculatorOpen]);
+
+  useEffect(() => {
+    calculatorDisplayRef.current = display;
+  }, [display]);
+
+  useEffect(() => {
+    if (!selectedJournalField) {
+      return;
+    }
+    if (!isApplyingRemoteJournalSelectionRef.current) {
+      return;
+    }
+    isApplyingRemoteJournalSelectionRef.current = false;
+    if (!isJournalOpenRef.current) {
+      return;
+    }
+    const selector = `[data-journal-entry-id="${selectedJournalField.entryId}"][data-journal-field="${selectedJournalField.field}"]`;
+    const target = document.querySelector(selector) as HTMLInputElement | null;
+    if (target) {
+      suppressNextJournalSelectionRef.current = true;
+      target.focus();
+      target.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [selectedJournalField]);
+
+  useEffect(() => {
     journalEntriesRef.current = journalEntries;
     const snapshot = buildCurrentDocumentSnapshot();
     scheduleDocumentSave({
@@ -5236,12 +5938,6 @@ function App() {
       journalEntries
     });
   }, [buildCurrentDocumentSnapshot, journalEntries, scheduleDocumentSave]);
-
-  useEffect(() => {
-    void saveAppSettings({
-      backgroundMode
-    }).catch(() => undefined);
-  }, [backgroundMode]);
 
   useEffect(() => {
     isOcrEnabledRef.current = isOcrEnabled;
@@ -5677,7 +6373,7 @@ function App() {
           title="Prima Nota"
           aria-label="Prima Nota"
           type="button"
-          onClick={() => setIsJournalOpen((value) => !value)}
+          onClick={toggleJournalPanel}
         >
           <i className="fa-solid fa-book-open" />
           <span>Prima Nota</span>
@@ -5707,7 +6403,7 @@ function App() {
           title="Calcolatrice"
           aria-label="Calcolatrice"
           type="button"
-          onClick={() => setIsCalculatorOpen((value) => !value)}
+          onClick={toggleCalculatorPanel}
         >
           <i className="fa-solid fa-calculator" />
           <span className="sr-only">Calcolatrice</span>
@@ -5891,6 +6587,16 @@ function App() {
           <i className="fa-solid fa-bars" />
         </button>
 
+        {/* Sync Multi-Room Manager */}
+        <SyncRoomManager
+          isConnected={syncIsConnected}
+          currentRoom={syncCurrentRoom}
+          latency={syncLatency}
+          onJoinRoom={syncJoinRoom}
+          onLeaveRoom={syncLeaveRoom}
+          connectedUsers={syncConnectedUsers}
+        />
+
         {/* Mobile Menu Content - vuoto, i pulsanti principali sono sempre visibili */}
         <div className={`mobile-menu ${isMobileMenuOpen ? 'open' : ''}`} onClick={(e) => e.stopPropagation()}>
           <div className="mobile-menu-row">
@@ -5923,14 +6629,20 @@ function App() {
         profileOptions={JOURNAL_PROFILE_OPTIONS}
         isExtracting={isJournalExtracting}
         minRows={MIN_VISIBLE_JOURNAL_ENTRIES}
-        onClose={() => setIsJournalOpen(false)}
-        onChangeProfile={setSelectedJournalProfileId}
+        onClose={closeJournalPanel}
+        onChangeProfile={changeJournalProfile}
         onExtract={() => void extractJournalData()}
         onAddEntry={addJournalEntry}
         onClearEntries={clearJournalEntries}
         onRemoveEntry={removeJournalEntry}
         onUpdateEntry={updateJournalEntry}
         onOpenVirtualKeyboard={openVirtualKeyboard}
+        onSelectField={handleJournalFieldSelect}
+        selectedField={selectedJournalField}
+        onCalculatorTargetChange={handleCalculatorTargetChange}
+        calculatorTarget={calculatorTarget}
+        onScroll={handleJournalScroll}
+        scrollPosition={journalScrollPosition}
         disableSystemKeyboard={disableSystemKeyboard}
       />
 
@@ -6140,7 +6852,7 @@ function App() {
               title="Chiudi"
               aria-label="Chiudi"
               type="button"
-              onClick={() => setIsCalculatorOpen(false)}
+              onClick={() => setCalculatorOpenWithSync(false)}
             >
               <i className="fa-solid fa-xmark" />
               <span className="sr-only">Chiudi</span>
